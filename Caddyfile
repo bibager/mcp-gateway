@@ -3,6 +3,26 @@
         respond "OK" 200
     }
 
+    # OAuth endpoints at root — forward to GA server for Claude's OAuth discovery
+    handle /.well-known/oauth-protected-resource {
+        reverse_proxy localhost:8002
+    }
+    handle /.well-known/oauth-authorization-server {
+        reverse_proxy localhost:8002
+    }
+    handle /register {
+        reverse_proxy localhost:8002
+    }
+    handle /authorize {
+        reverse_proxy localhost:8002
+    }
+    handle /callback {
+        reverse_proxy localhost:8002
+    }
+    handle /token {
+        reverse_proxy localhost:8002
+    }
+
     handle_path /monarch/* {
         reverse_proxy localhost:8000
     }
