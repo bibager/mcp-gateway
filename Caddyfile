@@ -4,20 +4,7 @@
         respond "OK" 200
     }
 
-    # --- GA MCP: mcp.bibager.com/ga/* and root OAuth ---
-    @ga_path path /ga/*
-    handle @ga_path {
-        uri strip_prefix /ga
-        reverse_proxy localhost:8002
-    }
-
-    # GA OAuth endpoints at root (for Claude OAuth discovery on mcp.bibager.com)
-    @ga_oauth path /.well-known/oauth-protected-resource /.well-known/oauth-authorization-server /register /authorize /callback /token
-    handle @ga_oauth {
-        reverse_proxy localhost:8002
-    }
-
-    # --- Todoist MCP: todoist.bibager.com ---
+    # --- Todoist MCP: todoist.bibager.com (MUST be before GA OAuth routes) ---
     @todoist header Host todoist.bibager.com
     handle @todoist {
         reverse_proxy localhost:8001
@@ -35,7 +22,20 @@
         reverse_proxy localhost:8003
     }
 
-    # Fallback path-based routes (for health checks and direct access)
+    # --- GA MCP: mcp.bibager.com/ga/* and root OAuth ---
+    @ga_path path /ga/*
+    handle @ga_path {
+        uri strip_prefix /ga
+        reverse_proxy localhost:8002
+    }
+
+    # GA OAuth endpoints at root (for Claude OAuth discovery on mcp.bibager.com only)
+    @ga_oauth path /.well-known/oauth-protected-resource /.well-known/oauth-authorization-server /register /authorize /callback /token
+    handle @ga_oauth {
+        reverse_proxy localhost:8002
+    }
+
+    # Fallback path-based routes (for direct access)
     handle_path /monarch/* {
         reverse_proxy localhost:8000
     }
