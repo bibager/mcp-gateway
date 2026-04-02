@@ -437,6 +437,9 @@ async def health(request: Request) -> JSONResponse:
 
 
 def _get_base_url(request: Request) -> str:
+    base = os.environ.get("SERVER_URL", "").rstrip("/")
+    if base:
+        return base
     base = str(request.base_url).rstrip("/")
     proto = request.headers.get("x-forwarded-proto", "")
     if proto == "https" and base.startswith("http://"):

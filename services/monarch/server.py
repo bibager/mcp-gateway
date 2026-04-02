@@ -538,6 +538,9 @@ async def api_token(request: Request) -> JSONResponse:
 
 def _get_base_url(request: Request) -> str:
     """Get the public base URL, respecting X-Forwarded-Proto from load balancers."""
+    base = os.environ.get("SERVER_URL", "").rstrip("/")
+    if base:
+        return base
     base = str(request.base_url).rstrip("/")
     # DigitalOcean (and other reverse proxies) terminate TLS and forward as http
     proto = request.headers.get("x-forwarded-proto", "")
