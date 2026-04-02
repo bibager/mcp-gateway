@@ -1,38 +1,47 @@
 :8080 {
+    # Health check for the gateway itself
     handle /health {
         respond "OK" 200
     }
 
-    # OAuth endpoints at root — forward to GA server for Claude's OAuth discovery
-    handle /.well-known/oauth-protected-resource {
-        reverse_proxy localhost:8002
-    }
-    handle /.well-known/oauth-authorization-server {
-        reverse_proxy localhost:8002
-    }
-    handle /register {
-        reverse_proxy localhost:8002
-    }
-    handle /authorize {
-        reverse_proxy localhost:8002
-    }
-    handle /callback {
-        reverse_proxy localhost:8002
-    }
-    handle /token {
+    # --- GA MCP: mcp.bibager.com/ga/* and root OAuth ---
+    @ga_path path /ga/*
+    handle @ga_path {
+        uri strip_prefix /ga
         reverse_proxy localhost:8002
     }
 
+    # GA OAuth endpoints at root (for Claude OAuth discovery on mcp.bibager.com)
+    @ga_oauth path /.well-known/oauth-protected-resource /.well-known/oauth-authorization-server /register /authorize /callback /token
+    handle @ga_oauth {
+        reverse_proxy localhost:8002
+    }
+
+    # --- Todoist MCP: todoist.bibager.com ---
+    @todoist header Host todoist.bibager.com
+    handle @todoist {
+        reverse_proxy localhost:8001
+    }
+
+    # --- Monarch MCP: monarch.bibager.com ---
+    @monarch header Host monarch.bibager.com
+    handle @monarch {
+        reverse_proxy localhost:8000
+    }
+
+    # --- GitLab MCP: gitlab.bibager.com (future) ---
+    @gitlab header Host gitlab.bibager.com
+    handle @gitlab {
+        reverse_proxy localhost:8003
+    }
+
+    # Fallback path-based routes (for health checks and direct access)
     handle_path /monarch/* {
         reverse_proxy localhost:8000
     }
 
     handle_path /todoist/* {
         reverse_proxy localhost:8001
-    }
-
-    handle_path /ga/* {
-        reverse_proxy localhost:8002
     }
 
     handle_path /gitlab/* {
