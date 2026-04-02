@@ -1,0 +1,25 @@
+:8080 {
+    handle /health {
+        respond "OK" 200
+    }
+
+    handle_path /monarch/* {
+        reverse_proxy localhost:8000
+    }
+
+    handle_path /todoist/* {
+        reverse_proxy localhost:8001
+    }
+
+    handle_path /ga/* {
+        reverse_proxy localhost:8002
+    }
+
+    handle_path /gitlab/* {
+        reverse_proxy localhost:8003
+    }
+
+    handle {
+        respond "Not Found" 404
+    }
+}
