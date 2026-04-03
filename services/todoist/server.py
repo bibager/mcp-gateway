@@ -5,17 +5,25 @@ Dual-protocol server:
   - /mcp   FastMCP streamable-HTTP (for Claude CoWork / Claude Desktop)
   - /health Unauthenticated health check
 
-Auth: Authorization: Bearer {MCP_API_KEY} on every route except /health.
+Auth: Authorization: Bearer {MCP_API_KEY} on every route except public paths.
 
-The OAuth flow is synthetic: it auto-approves and issues MCP_API_KEY as the
+The MCP OAuth flow is synthetic: it auto-approves and issues MCP_API_KEY as the
 access_token. This means Claude CoWork's stored token never expires — no more
 daily 401s.
 
+Todoist API auth supports two modes:
+  1. OAuth (preferred): Visit /todoist/auth?key={MCP_API_KEY} in a browser to
+     authorize via your Todoist developer app. The token is stored in memory
+     and displayed so you can persist it as TODOIST_API_TOKEN in env vars.
+  2. Static token fallback: Set TODOIST_API_TOKEN directly.
+
 Env vars:
-  TODOIST_API_TOKEN  required; your Todoist API token (never expires)
-  MCP_API_KEY        required; protects all endpoints — generate with:
-                     python -c "import secrets; print(secrets.token_hex(32))"
-  PORT               optional, defaults to 8001
+  MCP_API_KEY            required; protects all /mcp endpoints
+  TODOIST_API_TOKEN      optional fallback token; used until OAuth flow completes
+  TODOIST_CLIENT_ID      required for Todoist OAuth flow
+  TODOIST_CLIENT_SECRET  required for Todoist OAuth flow
+  PORT                   optional, defaults to 8001
+  SERVER_URL             optional; overrides base URL detection (e.g. https://todoist.bibager.com)
 """
 
 from __future__ import annotations
@@ -46,10 +54,18 @@ logger = logging.getLogger("todoist_mcp")
 # --- Config ------------------------------------------------------------------
 
 MCP_API_KEY: str = os.environ["MCP_API_KEY"]
-TODOIST_API_TOKEN: str = os.environ["TODOIST_API_TOKEN"]
+TODOIST_API_TOKEN: str = os.getenv("TODOIST_API_TOKEN", "")  # fallback; may be empty if using OAuth
+TODOIST_CLIENT_ID: str = os.getenv("TODOIST_CLIENT_ID", "")
+TODOIST_CLIENT_SECRET: str = os.getenv("TODOIST_CLIENT_SECRET", "")
 PORT: int = int(os.getenv("PORT", "8001"))
 
 TODOIST_BASE = "https://api.todoist.com/api/v1"
+
+# Active Todoist token — starts from env var, replaced after OAuth flow
+_todoist_access_token: str = TODOIST_API_TOKEN
+
+# Pending Todoist OAuth states: state -> expires_at timestamp
+_todoist_oauth_states: dict[str, float] = {}
 
 # --- OAuth 2.0 with PKCE (synthetic — issues MCP_API_KEY as access_token) ---
 
@@ -69,7 +85,7 @@ def _cleanup_expired_codes() -> None:
 
 def _auth_headers() -> dict[str, str]:
     return {
-        "Authorization": f"Bearer {TODOIST_API_TOKEN}",
+        "Authorization": f"Bearer {_todoist_access_token}",
         "Content-Type": "application/json",
     }
 
@@ -404,6 +420,92 @@ async def add_comment(
         return _json(r.json())
 
 
+# --- Todoist OAuth Routes ----------------------------------------------------
+
+
+async def todoist_auth_start(request: Request) -> RedirectResponse | JSONResponse:
+    """
+    Start the Todoist OAuth 2.0 authorization flow.
+    Visit /todoist/auth?key={MCP_API_KEY} in a browser to authorize.
+    Protected by key= query param so only the server owner can trigger it.
+    """
+    if request.query_params.get("key", "") != MCP_API_KEY:
+        return JSONResponse({"error": "Forbidden — include ?key={MCP_API_KEY}"}, status_code=403)
+    if not TODOIST_CLIENT_ID or not TODOIST_CLIENT_SECRET:
+        return JSONResponse(
+            {"error": "TODOIST_CLIENT_ID and TODOIST_CLIENT_SECRET env vars are required"},
+            status_code=500,
+        )
+
+    state = secrets.token_urlsafe(32)
+    _todoist_oauth_states[state] = time.time() + 600  # 10-minute window
+
+    base = _get_base_url(request)
+    redirect_uri = f"{base}/todoist/callback"
+    params = urlencode({
+        "client_id": TODOIST_CLIENT_ID,
+        "scope": "data:read_write,data:delete",
+        "state": state,
+        "redirect_uri": redirect_uri,
+    })
+    return RedirectResponse(f"https://todoist.com/oauth/authorize?{params}", status_code=302)
+
+
+async def todoist_auth_callback(request: Request) -> JSONResponse:
+    """
+    Todoist OAuth callback — exchanges auth code for an access token.
+    The token is stored in memory and shown so you can persist it in env vars.
+    """
+    global _todoist_access_token
+
+    params = dict(request.query_params)
+    error = params.get("error", "")
+    if error:
+        return JSONResponse({"error": error}, status_code=400)
+
+    code = params.get("code", "")
+    state = params.get("state", "")
+    if not code or not state:
+        return JSONResponse({"error": "missing code or state"}, status_code=400)
+
+    expires_at = _todoist_oauth_states.pop(state, None)
+    if not expires_at or time.time() > expires_at:
+        return JSONResponse({"error": "invalid or expired state — restart the flow"}, status_code=400)
+
+    base = _get_base_url(request)
+    redirect_uri = f"{base}/todoist/callback"
+
+    async with httpx.AsyncClient() as client:
+        r = await client.post(
+            "https://todoist.com/oauth/access_token",
+            data={
+                "client_id": TODOIST_CLIENT_ID,
+                "client_secret": TODOIST_CLIENT_SECRET,
+                "code": code,
+                "redirect_uri": redirect_uri,
+            },
+        )
+        r.raise_for_status()
+        data = r.json()
+
+    token = data.get("access_token", "")
+    if not token:
+        return JSONResponse({"error": "no access_token in response", "detail": data}, status_code=500)
+
+    _todoist_access_token = token
+    logger.info("Todoist access token updated via OAuth flow")
+
+    return JSONResponse({
+        "status": "authorized",
+        "message": (
+            "Todoist OAuth successful! The server is now using this token. "
+            "To persist it across restarts, copy the access_token below and set "
+            "TODOIST_API_TOKEN to this value in your DigitalOcean environment variables."
+        ),
+        "access_token": token,
+    })
+
+
 # --- Auth Middleware ----------------------------------------------------------
 
 _OAUTH_PUBLIC_PATHS = {
@@ -413,6 +515,8 @@ _OAUTH_PUBLIC_PATHS = {
     "/authorize",
     "/token",
     "/register",
+    "/todoist/auth",
+    "/todoist/callback",
 }
 
 
@@ -577,6 +681,8 @@ app = Starlette(
         Route("/authorize", endpoint=oauth_authorize, methods=["GET"]),
         Route("/token", endpoint=oauth_token, methods=["POST"]),
         Route("/register", endpoint=oauth_register, methods=["POST"]),
+        Route("/todoist/auth", endpoint=todoist_auth_start, methods=["GET"]),
+        Route("/todoist/callback", endpoint=todoist_auth_callback, methods=["GET"]),
         Mount("/", app=mcp_asgi),
     ],
     lifespan=lifespan,
