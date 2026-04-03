@@ -522,10 +522,12 @@ _OAUTH_PUBLIC_PATHS = {
 
 class APIKeyMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
-        if request.url.path in _OAUTH_PUBLIC_PATHS:
+        path = request.url.path.rstrip("/")
+        if path in _OAUTH_PUBLIC_PATHS:
             return await call_next(request)
         auth = request.headers.get("Authorization", "")
         if not (auth.startswith("Bearer ") and auth[7:] == MCP_API_KEY):
+            logger.warning("Unauthorized request to %s", request.url.path)
             return JSONResponse({"error": "Unauthorized"}, status_code=401)
         return await call_next(request)
 
