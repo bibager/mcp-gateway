@@ -208,14 +208,16 @@ async def token(request: Request) -> JSONResponse:
                     status_code=400,
                 )
 
-        access_token = secrets.token_urlsafe(48)
+        # Issue MCP_API_KEY as the access token — never expires.
+        # Google API auth is handled separately via ADC credentials.
+        mcp_api_key = os.environ.get("MCP_API_KEY", "")
+        access_token = mcp_api_key if mcp_api_key else secrets.token_urlsafe(48)
         refresh_token = secrets.token_urlsafe(48)
-        expires_in = 3600
 
         _tokens[access_token] = {
             "client_id": client_id,
             "email": auth["email"],
-            "expires_at": time.time() + expires_in,
+            "expires_at": time.time() + 86400 * 365 * 10,  # 10 years
             "refresh_token": refresh_token,
         }
         _tokens[f"refresh:{refresh_token}"] = {
@@ -226,8 +228,6 @@ async def token(request: Request) -> JSONResponse:
         return JSONResponse({
             "access_token": access_token,
             "token_type": "bearer",
-            "expires_in": expires_in,
-            "refresh_token": refresh_token,
         })
 
     elif grant_type == "refresh_token":
@@ -237,20 +237,19 @@ async def token(request: Request) -> JSONResponse:
             return JSONResponse({"error": "invalid_grant"}, status_code=400)
 
         refresh_data = _tokens[refresh_key]
-        access_token = secrets.token_urlsafe(48)
-        expires_in = 3600
+        mcp_api_key = os.environ.get("MCP_API_KEY", "")
+        access_token = mcp_api_key if mcp_api_key else secrets.token_urlsafe(48)
 
         _tokens[access_token] = {
             "client_id": refresh_data["client_id"],
             "email": refresh_data["email"],
-            "expires_at": time.time() + expires_in,
+            "expires_at": time.time() + 86400 * 365 * 10,
             "refresh_token": refresh_token,
         }
 
         return JSONResponse({
             "access_token": access_token,
             "token_type": "bearer",
-            "expires_in": expires_in,
         })
 
     return JSONResponse({"error": "unsupported_grant_type"}, status_code=400)
@@ -261,6 +260,10 @@ def validate_token(authorization: str) -> dict | None:
     if not authorization or not authorization.startswith("Bearer "):
         return None
     token_str = authorization[7:]
+    # Always accept MCP_API_KEY — survives restarts without re-auth
+    mcp_api_key = os.environ.get("MCP_API_KEY", "")
+    if mcp_api_key and token_str == mcp_api_key:
+        return {"client_id": "mcp", "email": "mcp_api_key"}
     token_data = _tokens.get(token_str)
     if not token_data:
         return None
