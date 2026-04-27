@@ -22,6 +22,12 @@
         reverse_proxy localhost:8003
     }
 
+    # --- Weather MCP: weather.bibager.com ---
+    @weather header Host weather.bibager.com
+    handle @weather {
+        reverse_proxy localhost:8004
+    }
+
     # --- GA MCP: mcp.bibager.com/ga/* and root OAuth ---
     @ga_path path /ga/*
     handle @ga_path {
@@ -46,6 +52,10 @@
 
     handle_path /gitlab/* {
         reverse_proxy localhost:8003
+    }
+
+    handle_path /weather/* {
+        reverse_proxy localhost:8004
     }
 
     handle {
