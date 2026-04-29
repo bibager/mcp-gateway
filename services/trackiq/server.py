@@ -1,19 +1,16 @@
 """
 TrackIQ MCP Proxy
 =================
-Wraps the upstream TrackIQ MCP server (https://app.trackiq.com/mcp) with the
-gateway's standard auth model so Claude CoWork can use it as a connector.
+Transparent HTTP-level streaming proxy for the upstream TrackIQ MCP server
+(https://app.trackiq.com/mcp). The MCP session lives directly between
+Claude CoWork and TrackIQ — we just rewrite the Authorization header.
 
 Flow:
   CoWork  --Bearer MCP_API_KEY-->  trackiq.bibager.com/mcp
   gateway --Bearer TRACKIQ_API_KEY--> app.trackiq.com/mcp
 
-The MCP OAuth flow is synthetic: it auto-approves and issues MCP_API_KEY as the
-access_token so Claude CoWork's stored token never expires.
-
-Tools are not reimplemented — FastMCP.as_proxy forwards every call upstream
-with the TrackIQ Bearer token injected. The 16 TrackIQ tools (Amazon ads,
-DSP, sales, inventory, search query performance) are exposed as-is.
+The MCP OAuth flow at the gateway is synthetic: it auto-approves and issues
+MCP_API_KEY as the access_token so Claude CoWork's stored token never expires.
 
 Env vars:
   MCP_API_KEY       required; protects the gateway side
@@ -31,18 +28,16 @@ import os
 import secrets
 import time
 from base64 import urlsafe_b64encode
-from contextlib import asynccontextmanager
 from typing import Any
 from urllib.parse import urlencode
 
+import httpx
 import uvicorn
-from fastmcp import Client, FastMCP
-from fastmcp.client.transports import StreamableHttpTransport
 from starlette.applications import Starlette
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
-from starlette.responses import JSONResponse, RedirectResponse
-from starlette.routing import Mount, Route
+from starlette.responses import JSONResponse, RedirectResponse, StreamingResponse
+from starlette.routing import Route
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger("trackiq_mcp")
@@ -54,25 +49,70 @@ TRACKIQ_API_KEY: str = os.environ["TRACKIQ_API_KEY"]
 TRACKIQ_UPSTREAM: str = os.getenv("TRACKIQ_UPSTREAM", "https://app.trackiq.com/mcp")
 PORT: int = int(os.getenv("PORT", "8005"))
 
-# --- FastMCP proxy -----------------------------------------------------------
+# Hop-by-hop headers (RFC 7230 §6.1) — never forward these.
+_HOP_BY_HOP = {
+    "connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
+    "te", "trailers", "transfer-encoding", "upgrade",
+}
+# Headers we strip from the inbound request (we set fresh values or skip them).
+_REQ_STRIP = _HOP_BY_HOP | {
+    "host", "authorization", "content-length",
+    "x-forwarded-for", "x-forwarded-proto", "x-forwarded-host",
+    "via", "cdn-loop", "do-connecting-ip", "x-cloud-trace-context",
+}
+# Headers we strip from the upstream response before relaying to CoWork.
+_RESP_STRIP = _HOP_BY_HOP | {"content-encoding", "content-length"}
 
-# Build a Client pointed at upstream TrackIQ with the API key as a Bearer header.
-# FastMCP.as_proxy creates a server that forwards every list/call to that client.
-_upstream_transport = StreamableHttpTransport(
-    url=TRACKIQ_UPSTREAM,
-    headers={"Authorization": f"Bearer {TRACKIQ_API_KEY}"},
-)
-_upstream = Client(transport=_upstream_transport)
 
-mcp = FastMCP.as_proxy(
-    _upstream,
-    name="trackiq_proxy",
-    instructions=(
-        "Amazon ads & marketplace analytics for the Manuka Doctor brand via TrackIQ. "
-        "Call list_marketplaces first to enumerate connected marketplaces and grab "
-        "their account_id values, then pass those into the other tools."
-    ),
-)
+# --- /mcp passthrough --------------------------------------------------------
+
+
+async def proxy_mcp(request: Request) -> StreamingResponse:
+    """Stream-forward any /mcp request to TrackIQ with our Bearer token."""
+    upstream_headers = {
+        k: v for k, v in request.headers.items()
+        if k.lower() not in _REQ_STRIP
+    }
+    upstream_headers["Authorization"] = f"Bearer {TRACKIQ_API_KEY}"
+
+    body = await request.body()
+
+    # No total timeout — MCP streamable HTTP can hold the connection open.
+    client = httpx.AsyncClient(timeout=httpx.Timeout(connect=10.0, read=None, write=30.0, pool=10.0))
+    upstream_req = client.build_request(
+        request.method,
+        TRACKIQ_UPSTREAM,
+        headers=upstream_headers,
+        params=dict(request.query_params),
+        content=body,
+    )
+    try:
+        upstream_resp = await client.send(upstream_req, stream=True)
+    except Exception as exc:
+        await client.aclose()
+        logger.error("Upstream connect failed: %s", exc)
+        return JSONResponse({"error": "upstream_unavailable", "detail": str(exc)}, status_code=502)
+
+    resp_headers = {
+        k: v for k, v in upstream_resp.headers.items()
+        if k.lower() not in _RESP_STRIP
+    }
+
+    async def body_iter():
+        try:
+            async for chunk in upstream_resp.aiter_raw():
+                yield chunk
+        finally:
+            await upstream_resp.aclose()
+            await client.aclose()
+
+    return StreamingResponse(
+        body_iter(),
+        status_code=upstream_resp.status_code,
+        headers=resp_headers,
+        media_type=upstream_resp.headers.get("content-type"),
+    )
+
 
 # --- OAuth 2.0 with PKCE (synthetic — issues MCP_API_KEY as access_token) ---
 
@@ -88,7 +128,7 @@ def _cleanup_expired_codes() -> None:
         del _oauth_codes[c]
 
 
-# --- Auth Middleware ----------------------------------------------------------
+# --- Auth Middleware ---------------------------------------------------------
 
 _OAUTH_PUBLIC_PATHS = {
     "/health",
@@ -239,15 +279,6 @@ async def oauth_token(request: Request) -> JSONResponse:
 
 # --- App Assembly ------------------------------------------------------------
 
-mcp_asgi = mcp.http_app()
-
-
-@asynccontextmanager
-async def lifespan(app: Starlette):
-    async with mcp_asgi.lifespan(app):
-        logger.info("TrackIQ MCP proxy ready on port %d (upstream: %s)", PORT, TRACKIQ_UPSTREAM)
-        yield
-
 
 app = Starlette(
     routes=[
@@ -257,12 +288,13 @@ app = Starlette(
         Route("/authorize", endpoint=oauth_authorize, methods=["GET"]),
         Route("/token", endpoint=oauth_token, methods=["POST"]),
         Route("/register", endpoint=oauth_register, methods=["POST"]),
-        Mount("/", app=mcp_asgi),
+        # /mcp catch-all proxy — accepts POST (RPC), GET (SSE long-poll), DELETE (session close)
+        Route("/mcp", endpoint=proxy_mcp, methods=["GET", "POST", "DELETE", "OPTIONS"]),
     ],
-    lifespan=lifespan,
 )
 
 app.add_middleware(APIKeyMiddleware)
 
 if __name__ == "__main__":
+    logger.info("TrackIQ MCP HTTP proxy starting on port %d (upstream: %s)", PORT, TRACKIQ_UPSTREAM)
     uvicorn.run(app, host="0.0.0.0", port=PORT, log_level="info")
