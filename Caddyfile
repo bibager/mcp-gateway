@@ -28,6 +28,12 @@
         reverse_proxy localhost:8004
     }
 
+    # --- TrackIQ MCP: trackiq.bibager.com ---
+    @trackiq header Host trackiq.bibager.com
+    handle @trackiq {
+        reverse_proxy localhost:8005
+    }
+
     # --- GA MCP: mcp.bibager.com/ga/* and root OAuth ---
     @ga_path path /ga/*
     handle @ga_path {
@@ -56,6 +62,10 @@
 
     handle_path /weather/* {
         reverse_proxy localhost:8004
+    }
+
+    handle_path /trackiq/* {
+        reverse_proxy localhost:8005
     }
 
     handle {

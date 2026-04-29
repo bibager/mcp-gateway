@@ -16,13 +16,15 @@ COPY services/todoist/requirements.txt /tmp/todoist-requirements.txt
 COPY services/ga/requirements.txt /tmp/ga-requirements.txt
 COPY services/gitlab/requirements.txt /tmp/gitlab-requirements.txt
 COPY services/weather/requirements.txt /tmp/weather-requirements.txt
+COPY services/trackiq/requirements.txt /tmp/trackiq-requirements.txt
 
 RUN pip install --no-cache-dir \
     -r /tmp/monarch-requirements.txt \
     -r /tmp/todoist-requirements.txt \
     -r /tmp/ga-requirements.txt \
     -r /tmp/gitlab-requirements.txt \
-    -r /tmp/weather-requirements.txt
+    -r /tmp/weather-requirements.txt \
+    -r /tmp/trackiq-requirements.txt
 
 COPY Caddyfile .
 COPY supervisord.conf /etc/supervisor/conf.d/supervisord.conf
