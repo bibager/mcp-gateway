@@ -35,6 +35,25 @@ app.use("*", async (c, next) => {
 
 app.get("/health", (c) => c.json({ status: "ok" }));
 
+app.post("/tools/get_current_page", async (c) => {
+    try {
+        const f = await getFramer();
+        const root = await f.getCanvasRoot();
+        const result: Record<string, unknown> = {
+            id: (root as { id?: string }).id ?? null,
+            name: (root as { name?: string }).name ?? null,
+            type: root.constructor?.name ?? "Unknown",
+        };
+        if ("path" in root && typeof (root as { path?: unknown }).path === "string") {
+            result.path = (root as { path: string }).path;
+        }
+        return c.json({ ok: true, result });
+    } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return c.json({ ok: false, error: msg }, 500);
+    }
+});
+
 serve({ fetch: app.fetch, port: PORT }, (info) => {
     console.log(`[framer-sidecar] listening on ${info.port}`);
 });
