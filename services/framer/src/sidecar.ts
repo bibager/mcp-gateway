@@ -54,6 +54,33 @@ app.post("/tools/get_current_page", async (c) => {
     }
 });
 
+app.post("/tools/create_web_page", async (c) => {
+    let body: { path?: unknown };
+    try {
+        body = await c.req.json();
+    } catch {
+        return c.json({ ok: false, error: "invalid_json" }, 400);
+    }
+    const path = body.path;
+    if (typeof path !== "string" || !path) {
+        return c.json({ ok: false, error: "missing_or_invalid_path" }, 400);
+    }
+    try {
+        const f = await getFramer();
+        const page = await f.createWebPage(path);
+        return c.json({
+            ok: true,
+            result: {
+                id: page.id,
+                path: page.path,
+            },
+        });
+    } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return c.json({ ok: false, error: msg }, 500);
+    }
+});
+
 serve({ fetch: app.fetch, port: PORT }, (info) => {
     console.log(`[framer-sidecar] listening on ${info.port}`);
 });
