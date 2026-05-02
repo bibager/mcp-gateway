@@ -9,6 +9,11 @@ RUN apt-get update && \
     apt-get install -y --no-install-recommends caddy supervisor && \
     apt-get clean && rm -rf /var/lib/apt/lists/*
 
+# --- Node.js 22 (for the framer sidecar) ---
+RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && \
+    apt-get install -y --no-install-recommends nodejs && \
+    apt-get clean && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /app
 
 COPY services/monarch/requirements.txt /tmp/monarch-requirements.txt
@@ -17,6 +22,7 @@ COPY services/ga/requirements.txt /tmp/ga-requirements.txt
 COPY services/gitlab/requirements.txt /tmp/gitlab-requirements.txt
 COPY services/weather/requirements.txt /tmp/weather-requirements.txt
 COPY services/trackiq/requirements.txt /tmp/trackiq-requirements.txt
+COPY services/framer/requirements.txt /tmp/framer-requirements.txt
 
 RUN pip install --no-cache-dir \
     -r /tmp/monarch-requirements.txt \
@@ -24,11 +30,15 @@ RUN pip install --no-cache-dir \
     -r /tmp/ga-requirements.txt \
     -r /tmp/gitlab-requirements.txt \
     -r /tmp/weather-requirements.txt \
-    -r /tmp/trackiq-requirements.txt
+    -r /tmp/trackiq-requirements.txt \
+    -r /tmp/framer-requirements.txt
 
 COPY Caddyfile .
 COPY supervisord.conf /etc/supervisor/conf.d/supervisord.conf
 COPY services/ services/
+
+# --- Build the framer sidecar (TypeScript -> dist/) ---
+RUN cd /app/services/framer && npm ci && npm run build && npm prune --omit=dev
 
 EXPOSE 8080
 

@@ -34,6 +34,12 @@
         reverse_proxy localhost:8005
     }
 
+    # --- Framer MCP: framer.bibager.com (Python frontend on 8007 -> Node sidecar on 8006) ---
+    @framer header Host framer.bibager.com
+    handle @framer {
+        reverse_proxy localhost:8007
+    }
+
     # --- GA MCP: mcp.bibager.com/ga/* and root OAuth ---
     @ga_path path /ga/*
     handle @ga_path {
@@ -66,6 +72,10 @@
 
     handle_path /trackiq/* {
         reverse_proxy localhost:8005
+    }
+
+    handle_path /framer/* {
+        reverse_proxy localhost:8007
     }
 
     handle {
