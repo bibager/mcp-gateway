@@ -81,6 +81,36 @@ app.post("/tools/create_web_page", async (c) => {
     }
 });
 
+app.post("/tools/create_text_node", async (c) => {
+    let body: { attributes?: unknown; text?: unknown; parent_id?: unknown };
+    try {
+        body = await c.req.json();
+    } catch {
+        return c.json({ ok: false, error: "invalid_json" }, 400);
+    }
+    const attributes = (body.attributes ?? {}) as Record<string, unknown>;
+    const parentId = typeof body.parent_id === "string" ? body.parent_id : undefined;
+    const text = typeof body.text === "string" ? body.text : undefined;
+
+    try {
+        const f = await getFramer();
+        const node = await f.createTextNode(
+            attributes as Parameters<typeof f.createTextNode>[0],
+            parentId,
+        );
+        if (!node) {
+            return c.json({ ok: false, error: "createTextNode returned null" }, 500);
+        }
+        if (text !== undefined) {
+            await node.setText(text);
+        }
+        return c.json({ ok: true, result: { id: node.id } });
+    } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return c.json({ ok: false, error: msg }, 500);
+    }
+});
+
 serve({ fetch: app.fetch, port: PORT }, (info) => {
     console.log(`[framer-sidecar] listening on ${info.port}`);
 });
