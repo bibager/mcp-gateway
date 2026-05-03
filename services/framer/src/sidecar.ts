@@ -1,4 +1,4 @@
-import { connect, type Framer, isTextNode } from "framer-api";
+import { connect, type Framer, isFrameNode, isTextNode } from "framer-api";
 import { Hono } from "hono";
 import { serve } from "@hono/node-server";
 
@@ -236,6 +236,90 @@ app.post("/tools/delete_node", async (c) => {
         const f = await getFramer();
         await f.removeNode(nodeId);
         return c.json({ ok: true, result: { ok: true } });
+    } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return c.json({ ok: false, error: msg }, 500);
+    }
+});
+
+app.post("/tools/upload_image", async (c) => {
+    let body: { image_url?: unknown; alt_text?: unknown; name?: unknown };
+    try {
+        body = await c.req.json();
+    } catch {
+        return c.json({ ok: false, error: "invalid_json" }, 400);
+    }
+    const imageUrl = body.image_url;
+    if (typeof imageUrl !== "string" || !imageUrl) {
+        return c.json({ ok: false, error: "missing_or_invalid_image_url" }, 400);
+    }
+    const altText = typeof body.alt_text === "string" ? body.alt_text : undefined;
+    const name = typeof body.name === "string" ? body.name : undefined;
+
+    try {
+        const f = await getFramer();
+        const input: Record<string, unknown> = { image: imageUrl };
+        if (altText !== undefined) input.altText = altText;
+        if (name !== undefined) input.name = name;
+        // Cast via `unknown` to satisfy TS (NamedImageAssetInput | File literal mismatch)
+        const asset = await f.uploadImage(input as unknown as Parameters<typeof f.uploadImage>[0]);
+        return c.json({
+            ok: true,
+            result: {
+                id: asset.id,
+                url: asset.url,
+                thumbnail_url: asset.thumbnailUrl,
+                alt_text: asset.altText ?? null,
+            },
+        });
+    } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return c.json({ ok: false, error: msg }, 500);
+    }
+});
+
+app.post("/tools/set_frame_image", async (c) => {
+    let body: { node_id?: unknown; image_url?: unknown };
+    try {
+        body = await c.req.json();
+    } catch {
+        return c.json({ ok: false, error: "invalid_json" }, 400);
+    }
+    const nodeId = body.node_id;
+    const imageUrl = body.image_url;
+    if (typeof nodeId !== "string" || !nodeId) {
+        return c.json({ ok: false, error: "missing_or_invalid_node_id" }, 400);
+    }
+    if (typeof imageUrl !== "string" || !imageUrl) {
+        return c.json({ ok: false, error: "missing_or_invalid_image_url" }, 400);
+    }
+    try {
+        const f = await getFramer();
+        const node = await f.getNode(nodeId);
+        if (!node) {
+            return c.json({ ok: false, error: "node_not_found" }, 404);
+        }
+        if (!isFrameNode(node)) {
+            return c.json({ ok: false, error: "node_is_not_a_frame_node" }, 400);
+        }
+        // Upload, then set the resulting asset as backgroundImage on the frame.
+        const uploadInput = { image: imageUrl } as unknown as Parameters<typeof f.uploadImage>[0];
+        const asset = await f.uploadImage(uploadInput);
+        const updated = await f.setAttributes(
+            nodeId,
+            { backgroundImage: asset } as unknown as Parameters<typeof f.setAttributes>[1],
+        );
+        if (!updated) {
+            return c.json({ ok: false, error: "setAttributes returned null" }, 500);
+        }
+        return c.json({
+            ok: true,
+            result: {
+                id: updated.id,
+                asset_id: asset.id,
+                asset_url: asset.url,
+            },
+        });
     } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         return c.json({ ok: false, error: msg }, 500);
