@@ -22,6 +22,19 @@ export async function getFramer(): Promise<Framer> {
     return framerInstance;
 }
 
+// Flatten any AnyNode to a JSON-safe shape for tool responses.
+function serializeNode(n: unknown): Record<string, unknown> | null {
+    if (!n || typeof n !== "object") return null;
+    const node = n as Record<string, unknown>;
+    const out: Record<string, unknown> = {
+        id: node["id"] ?? null,
+        name: node["name"] ?? null,
+        type: (n as { constructor?: { name?: string } }).constructor?.name ?? "Unknown",
+    };
+    if (typeof node["path"] === "string") out["path"] = node["path"];
+    return out;
+}
+
 const app = new Hono();
 
 // Internal-key guard: skip /health, require X-Sidecar-Key on everything else.
@@ -381,6 +394,94 @@ app.post("/tools/deploy", async (c) => {
                 count: hostnames.length,
             },
         });
+    } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return c.json({ ok: false, error: msg }, 500);
+    }
+});
+
+app.post("/tools/get_node", async (c) => {
+    let body: { node_id?: unknown };
+    try { body = await c.req.json(); } catch { return c.json({ ok: false, error: "invalid_json" }, 400); }
+    const nodeId = body.node_id;
+    if (typeof nodeId !== "string" || !nodeId) {
+        return c.json({ ok: false, error: "missing_or_invalid_node_id" }, 400);
+    }
+    try {
+        const f = await getFramer();
+        const node = await f.getNode(nodeId);
+        return c.json({ ok: true, result: serializeNode(node) });
+    } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return c.json({ ok: false, error: msg }, 500);
+    }
+});
+
+app.post("/tools/get_children", async (c) => {
+    let body: { node_id?: unknown };
+    try { body = await c.req.json(); } catch { return c.json({ ok: false, error: "invalid_json" }, 400); }
+    const nodeId = body.node_id;
+    if (typeof nodeId !== "string" || !nodeId) {
+        return c.json({ ok: false, error: "missing_or_invalid_node_id" }, 400);
+    }
+    try {
+        const f = await getFramer();
+        const children = await f.getChildren(nodeId);
+        return c.json({ ok: true, result: children.map(serializeNode) });
+    } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return c.json({ ok: false, error: msg }, 500);
+    }
+});
+
+app.post("/tools/get_parent", async (c) => {
+    let body: { node_id?: unknown };
+    try { body = await c.req.json(); } catch { return c.json({ ok: false, error: "invalid_json" }, 400); }
+    const nodeId = body.node_id;
+    if (typeof nodeId !== "string" || !nodeId) {
+        return c.json({ ok: false, error: "missing_or_invalid_node_id" }, 400);
+    }
+    try {
+        const f = await getFramer();
+        const parent = await f.getParent(nodeId);
+        return c.json({ ok: true, result: serializeNode(parent) });
+    } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return c.json({ ok: false, error: msg }, 500);
+    }
+});
+
+app.post("/tools/get_rect", async (c) => {
+    let body: { node_id?: unknown };
+    try { body = await c.req.json(); } catch { return c.json({ ok: false, error: "invalid_json" }, 400); }
+    const nodeId = body.node_id;
+    if (typeof nodeId !== "string" || !nodeId) {
+        return c.json({ ok: false, error: "missing_or_invalid_node_id" }, 400);
+    }
+    try {
+        const f = await getFramer();
+        const rect = await f.getRect(nodeId);
+        if (!rect) return c.json({ ok: true, result: null });
+        return c.json({ ok: true, result: { x: rect.x, y: rect.y, width: rect.width, height: rect.height } });
+    } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return c.json({ ok: false, error: msg }, 500);
+    }
+});
+
+app.post("/tools/get_nodes_with_type", async (c) => {
+    let body: { type?: unknown };
+    try { body = await c.req.json(); } catch { return c.json({ ok: false, error: "invalid_json" }, 400); }
+    const type = body.type;
+    const validTypes = ["FrameNode", "TextNode", "SVGNode", "ComponentInstanceNode",
+                        "WebPageNode", "DesignPageNode", "ComponentNode"];
+    if (typeof type !== "string" || !validTypes.includes(type)) {
+        return c.json({ ok: false, error: `invalid_type — must be one of ${validTypes.join(", ")}` }, 400);
+    }
+    try {
+        const f = await getFramer();
+        const nodes = await (f.getNodesWithType as (t: string) => Promise<unknown[]>)(type);
+        return c.json({ ok: true, result: nodes.map(serializeNode) });
     } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         return c.json({ ok: false, error: msg }, 500);
