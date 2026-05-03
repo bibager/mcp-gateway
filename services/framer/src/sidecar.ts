@@ -35,6 +35,44 @@ function serializeNode(n: unknown): Record<string, unknown> | null {
     return out;
 }
 
+function serializeColorStyle(s: unknown): Record<string, unknown> | null {
+    if (!s || typeof s !== "object") return null;
+    const o = s as Record<string, unknown>;
+    return {
+        id: o["id"] ?? null,
+        name: o["name"] ?? null,
+        // Common ColorStyleAttributes shape: { name, light, dark }
+        light: o["light"] ?? null,
+        dark: o["dark"] ?? null,
+    };
+}
+
+function serializeTextStyle(s: unknown): Record<string, unknown> | null {
+    if (!s || typeof s !== "object") return null;
+    const o = s as Record<string, unknown>;
+    // Surface obvious scalar fields; skip nested class instances.
+    const out: Record<string, unknown> = {
+        id: o["id"] ?? null,
+        name: o["name"] ?? null,
+    };
+    for (const k of ["fontSize", "fontWeight", "fontStyle", "lineHeight",
+                      "letterSpacing", "textAlign", "textDecoration", "textTransform", "tag"]) {
+        if (o[k] !== undefined) out[k] = o[k];
+    }
+    return out;
+}
+
+function serializeFont(f: unknown): Record<string, unknown> | null {
+    if (!f || typeof f !== "object") return null;
+    const o = f as Record<string, unknown>;
+    return {
+        id: o["id"] ?? null,
+        family: o["family"] ?? null,
+        weight: o["weight"] ?? null,
+        style: o["style"] ?? null,
+    };
+}
+
 const app = new Hono();
 
 // Internal-key guard: skip /health, require X-Sidecar-Key on everything else.
@@ -599,6 +637,93 @@ app.post("/tools/set_custom_code", async (c) => {
         const f = await getFramer();
         await f.setCustomCode({ html, location } as Parameters<typeof f.setCustomCode>[0]);
         return c.json({ ok: true, result: { ok: true, location, cleared: html === null } });
+    } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return c.json({ ok: false, error: msg }, 500);
+    }
+});
+
+app.post("/tools/get_color_styles", async (c) => {
+    try {
+        const f = await getFramer();
+        const styles = await f.getColorStyles();
+        return c.json({ ok: true, result: styles.map(serializeColorStyle) });
+    } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return c.json({ ok: false, error: msg }, 500);
+    }
+});
+
+app.post("/tools/create_color_style", async (c) => {
+    let body: { attributes?: unknown };
+    try { body = await c.req.json(); } catch { return c.json({ ok: false, error: "invalid_json" }, 400); }
+    const attrs = body.attributes;
+    if (typeof attrs !== "object" || attrs === null) {
+        return c.json({ ok: false, error: "missing_or_invalid_attributes (expected {name, light, dark?})" }, 400);
+    }
+    try {
+        const f = await getFramer();
+        const style = await f.createColorStyle(attrs as Parameters<typeof f.createColorStyle>[0]);
+        return c.json({ ok: true, result: serializeColorStyle(style) });
+    } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return c.json({ ok: false, error: msg }, 500);
+    }
+});
+
+app.post("/tools/get_text_styles", async (c) => {
+    try {
+        const f = await getFramer();
+        const styles = await f.getTextStyles();
+        return c.json({ ok: true, result: styles.map(serializeTextStyle) });
+    } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return c.json({ ok: false, error: msg }, 500);
+    }
+});
+
+app.post("/tools/create_text_style", async (c) => {
+    let body: { attributes?: unknown };
+    try { body = await c.req.json(); } catch { return c.json({ ok: false, error: "invalid_json" }, 400); }
+    const attrs = body.attributes;
+    if (typeof attrs !== "object" || attrs === null) {
+        return c.json({ ok: false, error: "missing_or_invalid_attributes" }, 400);
+    }
+    try {
+        const f = await getFramer();
+        const style = await f.createTextStyle(attrs as Parameters<typeof f.createTextStyle>[0]);
+        return c.json({ ok: true, result: serializeTextStyle(style) });
+    } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return c.json({ ok: false, error: msg }, 500);
+    }
+});
+
+app.post("/tools/get_fonts", async (c) => {
+    try {
+        const f = await getFramer();
+        const fonts = await f.getFonts();
+        return c.json({ ok: true, result: fonts.map(serializeFont) });
+    } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return c.json({ ok: false, error: msg }, 500);
+    }
+});
+
+app.post("/tools/get_font", async (c) => {
+    let body: { family?: unknown; weight?: unknown; style?: unknown };
+    try { body = await c.req.json(); } catch { return c.json({ ok: false, error: "invalid_json" }, 400); }
+    const family = body.family;
+    if (typeof family !== "string" || !family) {
+        return c.json({ ok: false, error: "missing_or_invalid_family" }, 400);
+    }
+    const fontAttrs: Record<string, unknown> = {};
+    if (typeof body.weight === "number") fontAttrs["weight"] = body.weight;
+    if (body.style === "normal" || body.style === "italic") fontAttrs["style"] = body.style;
+    try {
+        const f = await getFramer();
+        const font = await f.getFont(family, Object.keys(fontAttrs).length ? fontAttrs as Parameters<typeof f.getFont>[1] : undefined);
+        return c.json({ ok: true, result: serializeFont(font) });
     } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         return c.json({ ok: false, error: msg }, 500);
