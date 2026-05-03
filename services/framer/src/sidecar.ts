@@ -730,6 +730,99 @@ app.post("/tools/get_font", async (c) => {
     }
 });
 
+app.post("/tools/get_project_info", async (c) => {
+    try {
+        const f = await getFramer();
+        const info = await f.getProjectInfo();
+        return c.json({
+            ok: true,
+            result: {
+                id: info.id,
+                name: info.name,
+                api_version_1_id: info.apiVersion1Id ?? null,
+            },
+        });
+    } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return c.json({ ok: false, error: msg }, 500);
+    }
+});
+
+app.post("/tools/get_publish_info", async (c) => {
+    try {
+        const f = await getFramer();
+        const info = await f.getPublishInfo();
+        // PublishInfo shape varies — surface the raw object after a JSON round-trip
+        // to filter out non-serializable fields (functions, symbols, class instances).
+        const safe = JSON.parse(JSON.stringify(info, (_k, v) => {
+            if (typeof v === "function" || typeof v === "symbol") return undefined;
+            return v;
+        }));
+        return c.json({ ok: true, result: safe });
+    } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return c.json({ ok: false, error: msg }, 500);
+    }
+});
+
+app.post("/tools/screenshot", async (c) => {
+    let body: { node_id?: unknown; format?: unknown; scale?: unknown };
+    try { body = await c.req.json(); } catch { return c.json({ ok: false, error: "invalid_json" }, 400); }
+    const nodeId = body.node_id;
+    if (typeof nodeId !== "string" || !nodeId) {
+        return c.json({ ok: false, error: "missing_or_invalid_node_id" }, 400);
+    }
+    const options: Record<string, unknown> = {};
+    if (typeof body.format === "string") options["format"] = body.format;
+    if (typeof body.scale === "number") options["scale"] = body.scale;
+    try {
+        const f = await getFramer();
+        const r = await f.screenshot(nodeId, Object.keys(options).length
+            ? options as Parameters<typeof f.screenshot>[1]
+            : undefined);
+        // Handle the various shapes ScreenshotResult might take:
+        const result: Record<string, unknown> = {};
+        if (r && typeof r === "object") {
+            const ro = r as unknown as Record<string, unknown>;
+            // Common fields:
+            if (typeof ro["url"] === "string") result["url"] = ro["url"];
+            if (typeof ro["mimeType"] === "string") result["mime_type"] = ro["mimeType"];
+            if (typeof ro["width"] === "number") result["width"] = ro["width"];
+            if (typeof ro["height"] === "number") result["height"] = ro["height"];
+            // Binary data: base64-encode if present.
+            const data = ro["data"];
+            if (data instanceof Uint8Array) {
+                result["data_base64"] = Buffer.from(data).toString("base64");
+                result["byte_length"] = data.byteLength;
+            } else if (typeof data === "string") {
+                // Already-encoded (data URL or base64)
+                result["data"] = data;
+            }
+        }
+        return c.json({ ok: true, result });
+    } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return c.json({ ok: false, error: msg }, 500);
+    }
+});
+
+app.post("/tools/export_svg", async (c) => {
+    let body: { node_id?: unknown };
+    try { body = await c.req.json(); } catch { return c.json({ ok: false, error: "invalid_json" }, 400); }
+    const nodeId = body.node_id;
+    if (typeof nodeId !== "string" || !nodeId) {
+        return c.json({ ok: false, error: "missing_or_invalid_node_id" }, 400);
+    }
+    try {
+        const f = await getFramer();
+        const svg = await f.exportSVG(nodeId);
+        return c.json({ ok: true, result: { svg, length: svg.length } });
+    } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return c.json({ ok: false, error: msg }, 500);
+    }
+});
+
 serve({ fetch: app.fetch, port: PORT }, (info) => {
     console.log(`[framer-sidecar] listening on ${info.port}`);
 });
