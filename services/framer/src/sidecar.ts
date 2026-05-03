@@ -301,7 +301,14 @@ app.post("/tools/create_text_node", async (c) => {
 
     try {
         const f = await getFramer();
-        const resolved = await resolveAttributes(f, attributes);
+        // Setting `inlineTextStyle` directly on createTextNode causes Framer
+        // to drop the node's text content from the project save (the canvas
+        // renders it but publish emits an empty <br>). Hold the style aside
+        // and apply it via setAttributes after the text is set.
+        const attrsRest: Record<string, unknown> = { ...attributes };
+        const inlineTextStyle = attrsRest["inlineTextStyle"];
+        delete attrsRest["inlineTextStyle"];
+        const resolved = await resolveAttributes(f, attrsRest);
         const node = await f.createTextNode(
             resolved as Parameters<typeof f.createTextNode>[0],
             parentId,
@@ -311,6 +318,13 @@ app.post("/tools/create_text_node", async (c) => {
         }
         if (text !== undefined) {
             await node.setText(text);
+        }
+        if (inlineTextStyle !== undefined && inlineTextStyle !== null) {
+            const styleAttrs = await resolveAttributes(f, { inlineTextStyle });
+            await f.setAttributes(
+                node.id,
+                styleAttrs as Parameters<typeof f.setAttributes>[1],
+            );
         }
         return c.json({ ok: true, result: { id: node.id } });
     } catch (err) {
