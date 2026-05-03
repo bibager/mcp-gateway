@@ -111,6 +111,53 @@ app.post("/tools/create_text_node", async (c) => {
     }
 });
 
+app.post("/tools/create_design_page", async (c) => {
+    let body: { name?: unknown };
+    try {
+        body = await c.req.json();
+    } catch {
+        return c.json({ ok: false, error: "invalid_json" }, 400);
+    }
+    const name = body.name;
+    if (typeof name !== "string" || !name) {
+        return c.json({ ok: false, error: "missing_or_invalid_name" }, 400);
+    }
+    try {
+        const f = await getFramer();
+        const page = await f.createDesignPage(name);
+        return c.json({ ok: true, result: { id: page.id, name: page.name ?? null } });
+    } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return c.json({ ok: false, error: msg }, 500);
+    }
+});
+
+app.post("/tools/create_frame", async (c) => {
+    let body: { attributes?: unknown; parent_id?: unknown };
+    try {
+        body = await c.req.json();
+    } catch {
+        return c.json({ ok: false, error: "invalid_json" }, 400);
+    }
+    const attributes = (body.attributes ?? {}) as Record<string, unknown>;
+    const parentId = typeof body.parent_id === "string" ? body.parent_id : undefined;
+
+    try {
+        const f = await getFramer();
+        const node = await f.createFrameNode(
+            attributes as Parameters<typeof f.createFrameNode>[0],
+            parentId,
+        );
+        if (!node) {
+            return c.json({ ok: false, error: "createFrameNode returned null" }, 500);
+        }
+        return c.json({ ok: true, result: { id: node.id } });
+    } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return c.json({ ok: false, error: msg }, 500);
+    }
+});
+
 serve({ fetch: app.fetch, port: PORT }, (info) => {
     console.log(`[framer-sidecar] listening on ${info.port}`);
 });
