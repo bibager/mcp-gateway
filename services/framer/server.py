@@ -104,7 +104,12 @@ mcp = FastMCP(
         "HTML translation hint: walk the HTML, map <div>/<section> -> create_frame, "
         "<h1>-<h6>/<p> -> create_text_node with attributes.tag, <img> -> set_frame_image, "
         "CSS layout -> set_attributes with stack/grid/gap/padding traits. Use screenshot to "
-        "self-verify what was rendered."
+        "self-verify what was rendered. "
+        "CMS (content collections like blog posts, products, portfolio items): "
+        "get_collections lists what exists; create_collection makes a new one; "
+        "add_collection_fields defines schema (e.g. {name, type:'string'|'image'|'date'|'formattedText'|...}); "
+        "add_collection_items populates with [{slug, fieldData:{<field_id>: value}}]; "
+        "get_collection_items reads back; remove_collection_items deletes by id."
     ),
 )
 
@@ -581,6 +586,109 @@ async def get_code_file(id: str) -> str:
         id: The code file id (from get_code_files or create_code_file).
     """
     return await _call_sidecar("get_code_file", {"id": id})
+
+
+# --- v1.3 CMS tools ------------------------------------------------------
+
+@mcp.tool(name="get_collections", annotations={"readOnlyHint": True, "destructiveHint": False})
+async def get_collections() -> str:
+    """List all CMS collections in the project (id, name, managed_by, readonly)."""
+    return await _call_sidecar("get_collections", {})
+
+
+@mcp.tool(name="get_collection", annotations={"readOnlyHint": True, "destructiveHint": False})
+async def get_collection(id: str) -> str:
+    """
+    Get metadata for a single collection.
+
+    Args:
+        id: Collection id (from get_collections).
+    """
+    return await _call_sidecar("get_collection", {"id": id})
+
+
+@mcp.tool(name="get_collection_fields", annotations={"readOnlyHint": True, "destructiveHint": False})
+async def get_collection_fields(collection_id: str) -> str:
+    """
+    List the field schema (columns) defined on a collection.
+
+    Args:
+        collection_id: Collection id.
+    """
+    return await _call_sidecar("get_collection_fields", {"collection_id": collection_id})
+
+
+@mcp.tool(name="get_collection_items", annotations={"readOnlyHint": True, "destructiveHint": False})
+async def get_collection_items(collection_id: str) -> str:
+    """
+    List all items in a collection (id, slug, field_data).
+
+    Args:
+        collection_id: Collection id.
+    """
+    return await _call_sidecar("get_collection_items", {"collection_id": collection_id})
+
+
+@mcp.tool(name="create_collection", annotations={"readOnlyHint": False, "destructiveHint": False})
+async def create_collection(name: str) -> str:
+    """
+    Create a new (user-facing) CMS collection. Returns the new collection's id and name.
+    Define its schema afterwards with add_collection_fields, then populate with add_collection_items.
+
+    Args:
+        name: Collection display name (e.g. "Blog Posts").
+    """
+    return await _call_sidecar("create_collection", {"name": name})
+
+
+@mcp.tool(name="add_collection_fields", annotations={"readOnlyHint": False, "destructiveHint": False})
+async def add_collection_fields(collection_id: str, fields: list[dict[str, Any]]) -> str:
+    """
+    Add fields (columns) to a collection.
+
+    Args:
+        collection_id: Collection id.
+        fields: Array of field definitions. Each entry must have at least
+            {name, type}. Common types: "string", "formattedText", "number",
+            "boolean", "color", "image", "file", "link", "date", "enum",
+            "collectionReference", "multiCollectionReference", "array".
+            Type-specific fields (e.g. enum.cases, collectionReference.collectionId)
+            depend on the field type — see Framer's CMS field docs.
+            Example: [{"name": "Title", "type": "string"},
+                     {"name": "Body", "type": "formattedText"},
+                     {"name": "Cover", "type": "image"}]
+    """
+    return await _call_sidecar("add_collection_fields", {"collection_id": collection_id, "fields": fields})
+
+
+@mcp.tool(name="add_collection_items", annotations={"readOnlyHint": False, "destructiveHint": False})
+async def add_collection_items(collection_id: str, items: list[dict[str, Any]]) -> str:
+    """
+    Add items (rows) to a collection.
+
+    Args:
+        collection_id: Collection id.
+        items: Array of item entries. Each entry must have a `slug` (URL-safe
+            unique identifier) and may include a `fieldData` map keyed by
+            field id with type-specific values.
+            Example: [{"slug": "first-post",
+                       "fieldData": {"<title-field-id>": {"type": "string", "value": "Hello"},
+                                     "<body-field-id>": {"type": "formattedText", "value": "<p>Hi</p>"}}}]
+            (Run get_collection_fields first to discover the field ids.)
+    """
+    return await _call_sidecar("add_collection_items", {"collection_id": collection_id, "items": items})
+
+
+@mcp.tool(name="remove_collection_items", annotations={"readOnlyHint": False, "destructiveHint": True})
+async def remove_collection_items(collection_id: str, item_ids: list[str]) -> str:
+    """
+    Permanently delete items from a collection. Cannot be undone via the API.
+
+    Args:
+        collection_id: Collection id.
+        item_ids: Array of item ids to remove.
+    """
+    return await _call_sidecar("remove_collection_items", {"collection_id": collection_id, "item_ids": item_ids})
 
 
 # --- OAuth 2.0 with PKCE (synthetic — issues MCP_API_KEY as access_token) ---
