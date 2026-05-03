@@ -97,12 +97,17 @@ Internet → Caddy (port 8080) → Service routing by host/path
 - **Purpose**: Build native Framer pages from HTML/structured input via the Framer Server API
 - **Auth**: `FRAMER_API_KEY` (project-scoped Server API key, set in Framer Site Settings); `FRAMER_PROJECT_URL` points at the target project
 - **Architecture**: First polyglot service. Python FastMCP frontend at 8007 handles MCP/OAuth/auth; forwards each tool call over `localhost:8006` to a Node 22 sidecar holding the long-lived `framer-api@0.1.7` WebSocket connection. `SIDECAR_INTERNAL_KEY` guards the localhost RPC.
-- **MCP Tools (12)**:
-  - **Read**: `get_current_page`
-  - **Pages**: `create_web_page(path)`, `create_design_page(name)`
+- **MCP Tools (38)**:
+  - **Read / inspect**: `get_current_page`, `get_node`, `get_children`, `get_parent`, `get_rect`, `get_nodes_with_type`, `get_project_info`, `get_publish_info`
+  - **Pages**: `create_web_page(path)`, `create_design_page(name)`, `clone_web_page(node_id)`, `clone_node(node_id)`
   - **Layout**: `create_frame(attributes, parent_id?)`, `create_text_node(text/attributes, parent_id?)`
-  - **Mutate**: `set_attributes(node_id, attributes)`, `set_text(node_id, text)`, `delete_node(node_id)`
-  - **Images**: `upload_image(image_url, ...)`, `set_frame_image(node_id, image_url)` (uploads + paints in one call)
+  - **Mutate**: `set_attributes(node_id, attributes)`, `set_text(node_id, text)`, `set_parent(node_id, parent_id, index?)`, `delete_node(node_id)`
+  - **Images**: `upload_image(url)`, `set_frame_image(node_id, image_url)`
+  - **Design system**: `get_color_styles`, `create_color_style`, `get_text_styles`, `create_text_style`, `get_fonts`, `get_font(family, weight?, style?)`
+  - **Site settings**: `add_redirects([{from, to, expandToAllLocales?}])`, `set_custom_code({location, html|null})`
+  - **Visual feedback**: `screenshot(node_id, format?, scale?)` (PNG/JPEG bytes base64), `export_svg(node_id)`
+  - **Locales**: `get_locales`, `get_default_locale`, `get_active_locale` (latter returns 501 — plugin-only in `framer-api@0.1.7`)
+  - **Code files** (React components / overrides): `create_code_file(name, code)`, `get_code_files`, `get_code_file(id)`
   - **Ship**: `publish()`, `deploy(deployment_id)`
 - **OAuth**: Synthetic
 
@@ -184,6 +189,7 @@ Daily 9:00am CST. Cron → Todoist (P1+P2) → format → Claude Haiku → Gmail
 - **TrackIQ proxy** (Apr 2026): HTTP-streaming proxy to TrackIQ's MCP, 16 tools, Bearer-rewrite.
 - **Framer v1.0** (May 2026): 3 read/create tools — proved the polyglot Python+Node pattern.
 - **Framer v1.1** (May 2026): 12 tools total. Frame creation, layout traits, text mutation, image upload+paint, publish/deploy. Live integration verified end-to-end against TrackIQ-V2 project.
+- **Framer v1.2** (May 2026): 38 tools total. Added tree navigation (get_node/get_children/get_parent/get_rect/get_nodes_with_type), node manipulation (clone_node/clone_web_page/set_parent), site settings (add_redirects/set_custom_code), design system (color/text styles + fonts), visual feedback (screenshot/export_svg), project info, locales, and code files.
 
 ## Open follow-ups
 
