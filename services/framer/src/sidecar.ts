@@ -73,6 +73,32 @@ function serializeFont(f: unknown): Record<string, unknown> | null {
     };
 }
 
+function serializeLocale(l: unknown): Record<string, unknown> | null {
+    if (!l || typeof l !== "object") return null;
+    const o = l as Record<string, unknown>;
+    return {
+        id: o["id"] ?? null,
+        name: o["name"] ?? null,
+        code: o["code"] ?? null,
+        slug: o["slug"] ?? null,
+        fallback_locale_id: o["fallbackLocaleId"] ?? null,
+    };
+}
+
+function serializeCodeFile(cf: unknown): Record<string, unknown> | null {
+    if (!cf || typeof cf !== "object") return null;
+    const o = cf as Record<string, unknown>;
+    const out: Record<string, unknown> = {
+        id: o["id"] ?? null,
+        name: o["name"] ?? null,
+        path: o["path"] ?? null,
+        version_id: o["versionId"] ?? null,
+    };
+    // Surface source content if present (could be huge — caller should expect this).
+    if (typeof o["content"] === "string") out["content"] = o["content"];
+    return out;
+}
+
 const app = new Hono();
 
 // Internal-key guard: skip /health, require X-Sidecar-Key on everything else.
@@ -817,6 +843,93 @@ app.post("/tools/export_svg", async (c) => {
         const f = await getFramer();
         const svg = await f.exportSVG(nodeId);
         return c.json({ ok: true, result: { svg, length: svg.length } });
+    } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return c.json({ ok: false, error: msg }, 500);
+    }
+});
+
+app.post("/tools/get_locales", async (c) => {
+    try {
+        const f = await getFramer();
+        const locales = await f.getLocales();
+        return c.json({ ok: true, result: locales.map(serializeLocale) });
+    } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return c.json({ ok: false, error: msg }, 500);
+    }
+});
+
+app.post("/tools/get_default_locale", async (c) => {
+    try {
+        const f = await getFramer();
+        const l = await f.getDefaultLocale();
+        return c.json({ ok: true, result: serializeLocale(l) });
+    } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return c.json({ ok: false, error: msg }, 500);
+    }
+});
+
+// get_active_locale: NOT exposed.
+// `getActiveLocale` is in framer-api's BlockedMethods (line ~7171 of dist/index.d.ts)
+// and is not in $framerApiOnly. It is only callable from inside an actual Framer
+// plugin (the running editor), not via the headless framer-api connection.
+// Returning a 501 so the frontend wrapper can surface a clear error.
+app.post("/tools/get_active_locale", async (c) => {
+    return c.json({
+        ok: false,
+        error: "not_supported_via_framer_api: getActiveLocale is plugin-only (BlockedMethods); use get_default_locale or get_locales instead",
+    }, 501);
+});
+
+app.post("/tools/create_code_file", async (c) => {
+    let body: { name?: unknown; code?: unknown; edit_via_plugin?: unknown };
+    try { body = await c.req.json(); } catch { return c.json({ ok: false, error: "invalid_json" }, 400); }
+    const name = body.name;
+    const code = body.code;
+    if (typeof name !== "string" || !name) {
+        return c.json({ ok: false, error: "missing_or_invalid_name (e.g. 'MyComponent.tsx')" }, 400);
+    }
+    if (typeof code !== "string") {
+        return c.json({ ok: false, error: "missing_or_invalid_code" }, 400);
+    }
+    const options: { editViaPlugin?: boolean } | undefined =
+        typeof body.edit_via_plugin === "boolean"
+            ? { editViaPlugin: body.edit_via_plugin }
+            : undefined;
+    try {
+        const f = await getFramer();
+        const cf = await f.createCodeFile(name, code, options);
+        return c.json({ ok: true, result: serializeCodeFile(cf) });
+    } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return c.json({ ok: false, error: msg }, 500);
+    }
+});
+
+app.post("/tools/get_code_files", async (c) => {
+    try {
+        const f = await getFramer();
+        const files = await f.getCodeFiles();
+        return c.json({ ok: true, result: files.map(serializeCodeFile) });
+    } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return c.json({ ok: false, error: msg }, 500);
+    }
+});
+
+app.post("/tools/get_code_file", async (c) => {
+    let body: { id?: unknown };
+    try { body = await c.req.json(); } catch { return c.json({ ok: false, error: "invalid_json" }, 400); }
+    const id = body.id;
+    if (typeof id !== "string" || !id) {
+        return c.json({ ok: false, error: "missing_or_invalid_id" }, 400);
+    }
+    try {
+        const f = await getFramer();
+        const cf = await f.getCodeFile(id);
+        return c.json({ ok: true, result: serializeCodeFile(cf) });
     } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         return c.json({ ok: false, error: msg }, 500);
