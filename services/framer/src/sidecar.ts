@@ -326,6 +326,67 @@ app.post("/tools/set_frame_image", async (c) => {
     }
 });
 
+app.post("/tools/publish", async (c) => {
+    try {
+        const f = await getFramer();
+        const { deployment, hostnames } = await f.publish();
+        // Find a usable preview URL — prefer "version" (the freshly published preview),
+        // fall back to "default", then any published hostname.
+        const preview = hostnames.find((h) => h.type === "version")
+            ?? hostnames.find((h) => h.type === "default")
+            ?? hostnames.find((h) => h.isPublished)
+            ?? null;
+        return c.json({
+            ok: true,
+            result: {
+                deployment_id: deployment.id,
+                created_at: deployment.createdAt,
+                preview_url: preview ? `https://${preview.hostname}` : null,
+                hostnames: hostnames.map((h) => ({
+                    hostname: h.hostname,
+                    type: h.type,
+                    is_primary: h.isPrimary,
+                    is_published: h.isPublished,
+                })),
+            },
+        });
+    } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return c.json({ ok: false, error: msg }, 500);
+    }
+});
+
+app.post("/tools/deploy", async (c) => {
+    let body: { deployment_id?: unknown };
+    try {
+        body = await c.req.json();
+    } catch {
+        return c.json({ ok: false, error: "invalid_json" }, 400);
+    }
+    const deploymentId = body.deployment_id;
+    if (typeof deploymentId !== "string" || !deploymentId) {
+        return c.json({ ok: false, error: "missing_or_invalid_deployment_id" }, 400);
+    }
+    try {
+        const f = await getFramer();
+        const hostnames = await f.deploy(deploymentId);
+        return c.json({
+            ok: true,
+            result: {
+                hostnames: hostnames.map((h) => ({
+                    hostname: h.hostname,
+                    type: h.type,
+                    is_primary: h.isPrimary,
+                })),
+                count: hostnames.length,
+            },
+        });
+    } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return c.json({ ok: false, error: msg }, 500);
+    }
+});
+
 serve({ fetch: app.fetch, port: PORT }, (info) => {
     console.log(`[framer-sidecar] listening on ${info.port}`);
 });
