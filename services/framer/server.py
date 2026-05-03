@@ -91,11 +91,15 @@ mcp = FastMCP(
     "framer_mcp",
     instructions=(
         "Tools to build pages in a Framer site by calling the Framer Server API. "
-        "v1.0 surface is intentionally small for verification: get_current_page reads "
-        "the active canvas; create_web_page makes a new page; create_text_node adds "
-        "headings/paragraphs. Use create_text_node's `text` arg for plain content and "
-        "the `tag` field inside `attributes` for HTML semantics ('h1'-'h6' or 'p'). "
-        "More tools (frames, images, layout, publish) ship in v1.1."
+        "Read: get_current_page. Pages: create_web_page (URL-routed), create_design_page. "
+        "Layout primitives: create_frame (the workhorse for divs/sections), create_text_node "
+        "(headings/paragraphs — use attributes.tag for h1-h6 or p). Mutate any node with "
+        "set_attributes (size, position, fill, border, layout traits like stack/grid/gap/padding). "
+        "Update text content with set_text. Remove with delete_node. Images: upload_image "
+        "returns asset details; set_frame_image uploads-and-paints in one call. Ship: publish "
+        "creates a preview deployment; deploy promotes a deployment to the production domains. "
+        "Translation hint: walk HTML, map <div>/<section> to create_frame, <h1>-<h6>/<p> to "
+        "create_text_node with attributes.tag, <img> to set_frame_image on a freshly created frame."
     ),
 )
 
@@ -150,6 +154,164 @@ async def create_text_node(
     if parent_id is not None:
         args["parent_id"] = parent_id
     return await _call_sidecar("create_text_node", args)
+
+
+@mcp.tool(
+    name="create_design_page",
+    annotations={"readOnlyHint": False, "destructiveHint": False},
+)
+async def create_design_page(name: str) -> str:
+    """
+    Create a new Design Page (component-library style page, not URL-routed).
+
+    Args:
+        name: Page name shown in the Framer pages panel.
+    """
+    return await _call_sidecar("create_design_page", {"name": name})
+
+
+@mcp.tool(
+    name="create_frame",
+    annotations={"readOnlyHint": False, "destructiveHint": False},
+)
+async def create_frame(
+    attributes: Optional[dict[str, Any]] = None,
+    parent_id: Optional[str] = None,
+) -> str:
+    """
+    Create a new FrameNode on the canvas. The workhorse for layout containers.
+
+    Args:
+        attributes: Partial Framer EditableFrameNodeAttributes. Common keys:
+            width, height, x, y, backgroundColor, borderRadius, layout
+            ("stack" | "grid" | "none"), stackDirection ("horizontal" | "vertical"),
+            stackAlignment, stackDistribution, gap, padding, gridColumnCount,
+            gridRowCount, etc. See Framer Plugin API trait docs.
+        parent_id: Existing frame's node id to insert into. Omit for the canvas root.
+    """
+    args: dict[str, Any] = {}
+    if attributes is not None:
+        args["attributes"] = attributes
+    if parent_id is not None:
+        args["parent_id"] = parent_id
+    return await _call_sidecar("create_frame", args)
+
+
+@mcp.tool(
+    name="set_attributes",
+    annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True},
+)
+async def set_attributes(node_id: str, attributes: dict[str, Any]) -> str:
+    """
+    Update editable attributes on any canvas node.
+
+    Args:
+        node_id: The node id (returned from create_frame, create_text_node, etc.).
+        attributes: Partial attributes to set. Trait support depends on node type
+            (e.g., backgroundColor on FrameNode, font on TextNode, layout on either).
+    """
+    return await _call_sidecar("set_attributes", {"node_id": node_id, "attributes": attributes})
+
+
+@mcp.tool(
+    name="set_text",
+    annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True},
+)
+async def set_text(node_id: str, text: str) -> str:
+    """
+    Replace the text content of an existing TextNode.
+
+    Args:
+        node_id: A TextNode id (errors with 400 if the node is not a TextNode).
+        text: New plain text content.
+    """
+    return await _call_sidecar("set_text", {"node_id": node_id, "text": text})
+
+
+@mcp.tool(
+    name="delete_node",
+    annotations={"readOnlyHint": False, "destructiveHint": True},
+)
+async def delete_node(node_id: str) -> str:
+    """
+    Delete a node from the canvas. This is destructive and cannot be undone via the API.
+
+    Args:
+        node_id: The id of the node to remove.
+    """
+    return await _call_sidecar("delete_node", {"node_id": node_id})
+
+
+@mcp.tool(
+    name="upload_image",
+    annotations={"readOnlyHint": False, "destructiveHint": False},
+)
+async def upload_image(
+    image_url: str,
+    alt_text: Optional[str] = None,
+    name: Optional[str] = None,
+) -> str:
+    """
+    Upload an image from a URL to the project's asset library. Framer dedupes
+    repeat uploads of the same content. Useful when you want the asset id/url
+    for inspection before painting it onto a frame; otherwise prefer
+    set_frame_image which combines upload + paint in one call.
+
+    Args:
+        image_url: HTTP(S) URL to the source image.
+        alt_text: Optional alt text for accessibility.
+        name: Optional asset name shown in the assets panel.
+    """
+    args: dict[str, Any] = {"image_url": image_url}
+    if alt_text is not None:
+        args["alt_text"] = alt_text
+    if name is not None:
+        args["name"] = name
+    return await _call_sidecar("upload_image", args)
+
+
+@mcp.tool(
+    name="set_frame_image",
+    annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True},
+)
+async def set_frame_image(node_id: str, image_url: str) -> str:
+    """
+    Paint an image onto an existing FrameNode as its background. Uploads the image
+    and applies it in one call. Errors with 400 if node_id is not a FrameNode.
+
+    Args:
+        node_id: A FrameNode id.
+        image_url: HTTP(S) URL to the source image.
+    """
+    return await _call_sidecar("set_frame_image", {"node_id": node_id, "image_url": image_url})
+
+
+@mcp.tool(
+    name="publish",
+    annotations={"readOnlyHint": False, "destructiveHint": False},
+)
+async def publish() -> str:
+    """
+    Publish a fresh preview deployment of the project. Returns the deployment id
+    and a preview URL. Does not promote to production; call deploy(deployment_id)
+    afterwards to push to custom domains.
+    """
+    return await _call_sidecar("publish", {})
+
+
+@mcp.tool(
+    name="deploy",
+    annotations={"readOnlyHint": False, "destructiveHint": False},
+)
+async def deploy(deployment_id: str) -> str:
+    """
+    Promote an existing deployment to the project's production domain(s).
+    Returns the list of hostnames now serving the deployment.
+
+    Args:
+        deployment_id: A deployment id from a previous publish() call.
+    """
+    return await _call_sidecar("deploy", {"deployment_id": deployment_id})
 
 
 # --- OAuth 2.0 with PKCE (synthetic — issues MCP_API_KEY as access_token) ---
