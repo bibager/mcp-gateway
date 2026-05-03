@@ -1,5 +1,5 @@
 import { connect, type Framer, isFrameNode, isTextNode, isWebPageNode } from "framer-api";
-import { Hono } from "hono";
+import { Hono, type Context } from "hono";
 import { serve } from "@hono/node-server";
 
 const PORT = Number(process.env["PORT"] ?? 8006);
@@ -14,12 +14,58 @@ function required(name: string): string {
 }
 
 let framerInstance: Framer | null = null;
+let needsReconnect = false;
+let connectPromise: Promise<Framer> | null = null;
+
+// Heuristic: does this error message indicate the WebSocket dropped underneath us?
+function isConnectionError(msg: string): boolean {
+    return /connection closed|websocket|disconnected|not connected|ECONNRESET|ECONNREFUSED|socket hang up|EPIPE/i.test(
+        msg,
+    );
+}
+
+function markFramerDirty(reason: string): void {
+    if (!needsReconnect) {
+        console.warn(`[framer-sidecar] marking cache dirty: ${reason}`);
+    }
+    needsReconnect = true;
+}
 
 export async function getFramer(): Promise<Framer> {
-    if (framerInstance) return framerInstance;
-    framerInstance = await connect(PROJECT_URL, API_KEY);
-    console.log(`[framer-sidecar] connected to ${PROJECT_URL}`);
-    return framerInstance;
+    if (framerInstance && !needsReconnect) return framerInstance;
+    if (connectPromise) return connectPromise;
+
+    connectPromise = (async () => {
+        if (framerInstance) {
+            try {
+                await framerInstance.disconnect();
+            } catch (err) {
+                console.warn("[framer-sidecar] disconnect during reconnect failed:", err);
+            }
+            framerInstance = null;
+        }
+        const next = await connect(PROJECT_URL, API_KEY);
+        framerInstance = next;
+        needsReconnect = false;
+        console.log(`[framer-sidecar] connected to ${PROJECT_URL}`);
+        return next;
+    })();
+
+    try {
+        return await connectPromise;
+    } finally {
+        connectPromise = null;
+    }
+}
+
+// Centralized 500 helper — also invalidates the cached Framer connection
+// when the failure looks like a dropped WebSocket so the next call reconnects.
+function errResponse(c: Context, err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (isConnectionError(msg)) {
+        markFramerDirty(msg);
+    }
+    return c.json({ ok: false, error: msg }, 500);
 }
 
 // Flatten any AnyNode to a JSON-safe shape for tool responses.
@@ -164,8 +210,7 @@ app.post("/tools/get_current_page", async (c) => {
         }
         return c.json({ ok: true, result });
     } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        return c.json({ ok: false, error: msg }, 500);
+        return errResponse(c, err);
     }
 });
 
@@ -191,8 +236,7 @@ app.post("/tools/create_web_page", async (c) => {
             },
         });
     } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        return c.json({ ok: false, error: msg }, 500);
+        return errResponse(c, err);
     }
 });
 
@@ -221,8 +265,7 @@ app.post("/tools/create_text_node", async (c) => {
         }
         return c.json({ ok: true, result: { id: node.id } });
     } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        return c.json({ ok: false, error: msg }, 500);
+        return errResponse(c, err);
     }
 });
 
@@ -242,8 +285,7 @@ app.post("/tools/create_design_page", async (c) => {
         const page = await f.createDesignPage(name);
         return c.json({ ok: true, result: { id: page.id, name: page.name ?? null } });
     } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        return c.json({ ok: false, error: msg }, 500);
+        return errResponse(c, err);
     }
 });
 
@@ -268,8 +310,7 @@ app.post("/tools/create_frame", async (c) => {
         }
         return c.json({ ok: true, result: { id: node.id } });
     } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        return c.json({ ok: false, error: msg }, 500);
+        return errResponse(c, err);
     }
 });
 
@@ -299,8 +340,7 @@ app.post("/tools/set_attributes", async (c) => {
         }
         return c.json({ ok: true, result: { id: node.id } });
     } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        return c.json({ ok: false, error: msg }, 500);
+        return errResponse(c, err);
     }
 });
 
@@ -331,8 +371,7 @@ app.post("/tools/set_text", async (c) => {
         await node.setText(text);
         return c.json({ ok: true, result: { id: node.id } });
     } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        return c.json({ ok: false, error: msg }, 500);
+        return errResponse(c, err);
     }
 });
 
@@ -352,8 +391,7 @@ app.post("/tools/delete_node", async (c) => {
         await f.removeNode(nodeId);
         return c.json({ ok: true, result: { ok: true } });
     } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        return c.json({ ok: false, error: msg }, 500);
+        return errResponse(c, err);
     }
 });
 
@@ -388,8 +426,7 @@ app.post("/tools/upload_image", async (c) => {
             },
         });
     } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        return c.json({ ok: false, error: msg }, 500);
+        return errResponse(c, err);
     }
 });
 
@@ -436,8 +473,7 @@ app.post("/tools/set_frame_image", async (c) => {
             },
         });
     } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        return c.json({ ok: false, error: msg }, 500);
+        return errResponse(c, err);
     }
 });
 
@@ -466,8 +502,7 @@ app.post("/tools/publish", async (c) => {
             },
         });
     } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        return c.json({ ok: false, error: msg }, 500);
+        return errResponse(c, err);
     }
 });
 
@@ -497,8 +532,7 @@ app.post("/tools/deploy", async (c) => {
             },
         });
     } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        return c.json({ ok: false, error: msg }, 500);
+        return errResponse(c, err);
     }
 });
 
@@ -514,8 +548,7 @@ app.post("/tools/get_node", async (c) => {
         const node = await f.getNode(nodeId);
         return c.json({ ok: true, result: serializeNode(node) });
     } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        return c.json({ ok: false, error: msg }, 500);
+        return errResponse(c, err);
     }
 });
 
@@ -531,8 +564,7 @@ app.post("/tools/get_children", async (c) => {
         const children = await f.getChildren(nodeId);
         return c.json({ ok: true, result: children.map(serializeNode) });
     } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        return c.json({ ok: false, error: msg }, 500);
+        return errResponse(c, err);
     }
 });
 
@@ -548,8 +580,7 @@ app.post("/tools/get_parent", async (c) => {
         const parent = await f.getParent(nodeId);
         return c.json({ ok: true, result: serializeNode(parent) });
     } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        return c.json({ ok: false, error: msg }, 500);
+        return errResponse(c, err);
     }
 });
 
@@ -566,8 +597,7 @@ app.post("/tools/get_rect", async (c) => {
         if (!rect) return c.json({ ok: true, result: null });
         return c.json({ ok: true, result: { x: rect.x, y: rect.y, width: rect.width, height: rect.height } });
     } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        return c.json({ ok: false, error: msg }, 500);
+        return errResponse(c, err);
     }
 });
 
@@ -585,8 +615,7 @@ app.post("/tools/get_nodes_with_type", async (c) => {
         const nodes = await (f.getNodesWithType as (t: string) => Promise<unknown[]>)(type);
         return c.json({ ok: true, result: nodes.map(serializeNode) });
     } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        return c.json({ ok: false, error: msg }, 500);
+        return errResponse(c, err);
     }
 });
 
@@ -602,8 +631,7 @@ app.post("/tools/clone_node", async (c) => {
         const cloned = await f.cloneNode(nodeId);
         return c.json({ ok: true, result: serializeNode(cloned) });
     } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        return c.json({ ok: false, error: msg }, 500);
+        return errResponse(c, err);
     }
 });
 
@@ -626,8 +654,7 @@ app.post("/tools/clone_web_page", async (c) => {
         const page = await node.clone();
         return c.json({ ok: true, result: serializeNode(page) });
     } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        return c.json({ ok: false, error: msg }, 500);
+        return errResponse(c, err);
     }
 });
 
@@ -648,8 +675,7 @@ app.post("/tools/set_parent", async (c) => {
         await f.setParent(nodeId, parentId, index);
         return c.json({ ok: true, result: { ok: true } });
     } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        return c.json({ ok: false, error: msg }, 500);
+        return errResponse(c, err);
     }
 });
 
@@ -679,8 +705,7 @@ app.post("/tools/add_redirects", async (c) => {
             })),
         });
     } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        return c.json({ ok: false, error: msg }, 500);
+        return errResponse(c, err);
     }
 });
 
@@ -702,8 +727,7 @@ app.post("/tools/set_custom_code", async (c) => {
         await f.setCustomCode({ html, location } as Parameters<typeof f.setCustomCode>[0]);
         return c.json({ ok: true, result: { ok: true, location, cleared: html === null } });
     } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        return c.json({ ok: false, error: msg }, 500);
+        return errResponse(c, err);
     }
 });
 
@@ -713,8 +737,7 @@ app.post("/tools/get_color_styles", async (c) => {
         const styles = await f.getColorStyles();
         return c.json({ ok: true, result: styles.map(serializeColorStyle) });
     } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        return c.json({ ok: false, error: msg }, 500);
+        return errResponse(c, err);
     }
 });
 
@@ -730,8 +753,7 @@ app.post("/tools/create_color_style", async (c) => {
         const style = await f.createColorStyle(attrs as Parameters<typeof f.createColorStyle>[0]);
         return c.json({ ok: true, result: serializeColorStyle(style) });
     } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        return c.json({ ok: false, error: msg }, 500);
+        return errResponse(c, err);
     }
 });
 
@@ -741,8 +763,7 @@ app.post("/tools/get_text_styles", async (c) => {
         const styles = await f.getTextStyles();
         return c.json({ ok: true, result: styles.map(serializeTextStyle) });
     } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        return c.json({ ok: false, error: msg }, 500);
+        return errResponse(c, err);
     }
 });
 
@@ -758,8 +779,7 @@ app.post("/tools/create_text_style", async (c) => {
         const style = await f.createTextStyle(attrs as Parameters<typeof f.createTextStyle>[0]);
         return c.json({ ok: true, result: serializeTextStyle(style) });
     } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        return c.json({ ok: false, error: msg }, 500);
+        return errResponse(c, err);
     }
 });
 
@@ -769,8 +789,7 @@ app.post("/tools/get_fonts", async (c) => {
         const fonts = await f.getFonts();
         return c.json({ ok: true, result: fonts.map(serializeFont) });
     } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        return c.json({ ok: false, error: msg }, 500);
+        return errResponse(c, err);
     }
 });
 
@@ -789,8 +808,7 @@ app.post("/tools/get_font", async (c) => {
         const font = await f.getFont(family, Object.keys(fontAttrs).length ? fontAttrs as Parameters<typeof f.getFont>[1] : undefined);
         return c.json({ ok: true, result: serializeFont(font) });
     } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        return c.json({ ok: false, error: msg }, 500);
+        return errResponse(c, err);
     }
 });
 
@@ -807,8 +825,7 @@ app.post("/tools/get_project_info", async (c) => {
             },
         });
     } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        return c.json({ ok: false, error: msg }, 500);
+        return errResponse(c, err);
     }
 });
 
@@ -824,8 +841,7 @@ app.post("/tools/get_publish_info", async (c) => {
         }));
         return c.json({ ok: true, result: safe });
     } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        return c.json({ ok: false, error: msg }, 500);
+        return errResponse(c, err);
     }
 });
 
@@ -865,8 +881,7 @@ app.post("/tools/screenshot", async (c) => {
         }
         return c.json({ ok: true, result });
     } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        return c.json({ ok: false, error: msg }, 500);
+        return errResponse(c, err);
     }
 });
 
@@ -882,8 +897,7 @@ app.post("/tools/export_svg", async (c) => {
         const svg = await f.exportSVG(nodeId);
         return c.json({ ok: true, result: { svg, length: svg.length } });
     } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        return c.json({ ok: false, error: msg }, 500);
+        return errResponse(c, err);
     }
 });
 
@@ -893,8 +907,7 @@ app.post("/tools/get_locales", async (c) => {
         const locales = await f.getLocales();
         return c.json({ ok: true, result: locales.map(serializeLocale) });
     } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        return c.json({ ok: false, error: msg }, 500);
+        return errResponse(c, err);
     }
 });
 
@@ -904,8 +917,7 @@ app.post("/tools/get_default_locale", async (c) => {
         const l = await f.getDefaultLocale();
         return c.json({ ok: true, result: serializeLocale(l) });
     } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        return c.json({ ok: false, error: msg }, 500);
+        return errResponse(c, err);
     }
 });
 
@@ -941,8 +953,7 @@ app.post("/tools/create_code_file", async (c) => {
         const cf = await f.createCodeFile(name, code, options);
         return c.json({ ok: true, result: serializeCodeFile(cf) });
     } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        return c.json({ ok: false, error: msg }, 500);
+        return errResponse(c, err);
     }
 });
 
@@ -952,8 +963,7 @@ app.post("/tools/get_code_files", async (c) => {
         const files = await f.getCodeFiles();
         return c.json({ ok: true, result: files.map(serializeCodeFile) });
     } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        return c.json({ ok: false, error: msg }, 500);
+        return errResponse(c, err);
     }
 });
 
@@ -969,8 +979,7 @@ app.post("/tools/get_code_file", async (c) => {
         const cf = await f.getCodeFile(id);
         return c.json({ ok: true, result: serializeCodeFile(cf) });
     } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        return c.json({ ok: false, error: msg }, 500);
+        return errResponse(c, err);
     }
 });
 
@@ -980,8 +989,7 @@ app.post("/tools/get_collections", async (c) => {
         const cols = await f.getCollections();
         return c.json({ ok: true, result: cols.map(serializeCollection) });
     } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        return c.json({ ok: false, error: msg }, 500);
+        return errResponse(c, err);
     }
 });
 
@@ -997,8 +1005,7 @@ app.post("/tools/get_collection", async (c) => {
         const col = await f.getCollection(id);
         return c.json({ ok: true, result: serializeCollection(col) });
     } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        return c.json({ ok: false, error: msg }, 500);
+        return errResponse(c, err);
     }
 });
 
@@ -1016,8 +1023,7 @@ app.post("/tools/get_collection_fields", async (c) => {
         const fields = await col.getFields();
         return c.json({ ok: true, result: fields.map(serializeCollectionField) });
     } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        return c.json({ ok: false, error: msg }, 500);
+        return errResponse(c, err);
     }
 });
 
@@ -1035,8 +1041,7 @@ app.post("/tools/get_collection_items", async (c) => {
         const items = await col.getItems();
         return c.json({ ok: true, result: items.map(serializeCollectionItem) });
     } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        return c.json({ ok: false, error: msg }, 500);
+        return errResponse(c, err);
     }
 });
 
@@ -1052,8 +1057,7 @@ app.post("/tools/create_collection", async (c) => {
         const col = await f.createCollection(name);
         return c.json({ ok: true, result: serializeCollection(col) });
     } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        return c.json({ ok: false, error: msg }, 500);
+        return errResponse(c, err);
     }
 });
 
@@ -1081,8 +1085,7 @@ app.post("/tools/add_collection_fields", async (c) => {
         const added = await col.addFields(fields as Parameters<typeof col.addFields>[0]);
         return c.json({ ok: true, result: added.map(serializeCollectionField) });
     } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        return c.json({ ok: false, error: msg }, 500);
+        return errResponse(c, err);
     }
 });
 
@@ -1110,8 +1113,7 @@ app.post("/tools/add_collection_items", async (c) => {
         await col.addItems(items as Parameters<typeof col.addItems>[0]);
         return c.json({ ok: true, result: { added: items.length } });
     } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        return c.json({ ok: false, error: msg }, 500);
+        return errResponse(c, err);
     }
 });
 
@@ -1133,8 +1135,7 @@ app.post("/tools/remove_collection_items", async (c) => {
         await col.removeItems(itemIds as string[]);
         return c.json({ ok: true, result: { removed: itemIds.length } });
     } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        return c.json({ ok: false, error: msg }, 500);
+        return errResponse(c, err);
     }
 });
 
@@ -1154,5 +1155,23 @@ for (const sig of ["SIGINT", "SIGTERM"] as const) {
         process.exit(0);
     });
 }
+
+// Safety net — framer-api can throw async errors out-of-band when the
+// WebSocket drops. Log + invalidate the cache so the next tool call
+// reconnects cleanly, instead of letting the process crash.
+process.on("unhandledRejection", (reason) => {
+    const msg = reason instanceof Error ? reason.message : String(reason);
+    console.error("[framer-sidecar] unhandledRejection:", msg);
+    if (isConnectionError(msg)) {
+        markFramerDirty(`unhandledRejection: ${msg}`);
+    }
+});
+
+process.on("uncaughtException", (err) => {
+    console.error("[framer-sidecar] uncaughtException:", err);
+    if (isConnectionError(err.message)) {
+        markFramerDirty(`uncaughtException: ${err.message}`);
+    }
+});
 
 export { app };
