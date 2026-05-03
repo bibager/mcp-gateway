@@ -97,7 +97,7 @@ Internet → Caddy (port 8080) → Service routing by host/path
 - **Purpose**: Build native Framer pages from HTML/structured input via the Framer Server API
 - **Auth**: `FRAMER_API_KEY` (project-scoped Server API key, set in Framer Site Settings); `FRAMER_PROJECT_URL` points at the target project
 - **Architecture**: First polyglot service. Python FastMCP frontend at 8007 handles MCP/OAuth/auth; forwards each tool call over `localhost:8006` to a Node 22 sidecar holding the long-lived `framer-api@0.1.7` WebSocket connection. `SIDECAR_INTERNAL_KEY` guards the localhost RPC.
-- **MCP Tools (38)**:
+- **MCP Tools (46)**:
   - **Read / inspect**: `get_current_page`, `get_node`, `get_children`, `get_parent`, `get_rect`, `get_nodes_with_type`, `get_project_info`, `get_publish_info`
   - **Pages**: `create_web_page(path)`, `create_design_page(name)`, `clone_web_page(node_id)`, `clone_node(node_id)`
   - **Layout**: `create_frame(attributes, parent_id?)`, `create_text_node(text/attributes, parent_id?)`
@@ -108,6 +108,7 @@ Internet → Caddy (port 8080) → Service routing by host/path
   - **Visual feedback**: `screenshot(node_id, format?, scale?)` (PNG/JPEG bytes base64), `export_svg(node_id)`
   - **Locales**: `get_locales`, `get_default_locale`, `get_active_locale` (latter returns 501 — plugin-only in `framer-api@0.1.7`)
   - **Code files** (React components / overrides): `create_code_file(name, code)`, `get_code_files`, `get_code_file(id)`
+  - **CMS**: `get_collections`, `get_collection(id)`, `get_collection_fields(collection_id)`, `get_collection_items(collection_id)`, `create_collection(name)`, `add_collection_fields(collection_id, fields)`, `add_collection_items(collection_id, items)`, `remove_collection_items(collection_id, item_ids)` — drives blog posts, products, portfolio etc.
   - **Ship**: `publish()`, `deploy(deployment_id)`
 - **OAuth**: Synthetic
 
@@ -190,6 +191,7 @@ Daily 9:00am CST. Cron → Todoist (P1+P2) → format → Claude Haiku → Gmail
 - **Framer v1.0** (May 2026): 3 read/create tools — proved the polyglot Python+Node pattern.
 - **Framer v1.1** (May 2026): 12 tools total. Frame creation, layout traits, text mutation, image upload+paint, publish/deploy. Live integration verified end-to-end against TrackIQ-V2 project.
 - **Framer v1.2** (May 2026): 38 tools total. Added tree navigation (get_node/get_children/get_parent/get_rect/get_nodes_with_type), node manipulation (clone_node/clone_web_page/set_parent), site settings (add_redirects/set_custom_code), design system (color/text styles + fonts), visual feedback (screenshot/export_svg), project info, locales, and code files.
+- **Framer v1.3** (May 2026): 46 tools total. Added CMS data plane via the `Collection` class — list/create collections, add/list fields, add/list/remove items. End-to-end verified by creating a "Claude CMS Test" collection in TrackIQ V2 with Title (string) + Body (formattedText) fields and 2 populated items.
 
 ## Open follow-ups
 
