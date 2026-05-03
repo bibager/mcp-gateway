@@ -1,4 +1,4 @@
-import { connect, type Framer } from "framer-api";
+import { connect, type Framer, isTextNode } from "framer-api";
 import { Hono } from "hono";
 import { serve } from "@hono/node-server";
 
@@ -152,6 +152,90 @@ app.post("/tools/create_frame", async (c) => {
             return c.json({ ok: false, error: "createFrameNode returned null" }, 500);
         }
         return c.json({ ok: true, result: { id: node.id } });
+    } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return c.json({ ok: false, error: msg }, 500);
+    }
+});
+
+app.post("/tools/set_attributes", async (c) => {
+    let body: { node_id?: unknown; attributes?: unknown };
+    try {
+        body = await c.req.json();
+    } catch {
+        return c.json({ ok: false, error: "invalid_json" }, 400);
+    }
+    const nodeId = body.node_id;
+    const attributes = body.attributes;
+    if (typeof nodeId !== "string" || !nodeId) {
+        return c.json({ ok: false, error: "missing_or_invalid_node_id" }, 400);
+    }
+    if (typeof attributes !== "object" || attributes === null) {
+        return c.json({ ok: false, error: "missing_or_invalid_attributes" }, 400);
+    }
+    try {
+        const f = await getFramer();
+        const node = await f.setAttributes(
+            nodeId,
+            attributes as Parameters<typeof f.setAttributes>[1],
+        );
+        if (!node) {
+            return c.json({ ok: false, error: "setAttributes returned null" }, 500);
+        }
+        return c.json({ ok: true, result: { id: node.id } });
+    } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return c.json({ ok: false, error: msg }, 500);
+    }
+});
+
+app.post("/tools/set_text", async (c) => {
+    let body: { node_id?: unknown; text?: unknown };
+    try {
+        body = await c.req.json();
+    } catch {
+        return c.json({ ok: false, error: "invalid_json" }, 400);
+    }
+    const nodeId = body.node_id;
+    const text = body.text;
+    if (typeof nodeId !== "string" || !nodeId) {
+        return c.json({ ok: false, error: "missing_or_invalid_node_id" }, 400);
+    }
+    if (typeof text !== "string") {
+        return c.json({ ok: false, error: "missing_or_invalid_text" }, 400);
+    }
+    try {
+        const f = await getFramer();
+        const node = await f.getNode(nodeId);
+        if (!node) {
+            return c.json({ ok: false, error: "node_not_found" }, 404);
+        }
+        if (!isTextNode(node)) {
+            return c.json({ ok: false, error: "node_is_not_a_text_node" }, 400);
+        }
+        await node.setText(text);
+        return c.json({ ok: true, result: { id: node.id } });
+    } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return c.json({ ok: false, error: msg }, 500);
+    }
+});
+
+app.post("/tools/delete_node", async (c) => {
+    let body: { node_id?: unknown };
+    try {
+        body = await c.req.json();
+    } catch {
+        return c.json({ ok: false, error: "invalid_json" }, 400);
+    }
+    const nodeId = body.node_id;
+    if (typeof nodeId !== "string" || !nodeId) {
+        return c.json({ ok: false, error: "missing_or_invalid_node_id" }, 400);
+    }
+    try {
+        const f = await getFramer();
+        await f.removeNode(nodeId);
+        return c.json({ ok: true, result: { ok: true } });
     } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         return c.json({ ok: false, error: msg }, 500);
