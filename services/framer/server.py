@@ -90,16 +90,21 @@ async def _call_sidecar(tool: str, args: dict[str, Any]) -> str:
 mcp = FastMCP(
     "framer_mcp",
     instructions=(
-        "Tools to build pages in a Framer site by calling the Framer Server API. "
-        "Read: get_current_page. Pages: create_web_page (URL-routed), create_design_page. "
-        "Layout primitives: create_frame (the workhorse for divs/sections), create_text_node "
-        "(headings/paragraphs — use attributes.tag for h1-h6 or p). Mutate any node with "
-        "set_attributes (size, position, fill, border, layout traits like stack/grid/gap/padding). "
-        "Update text content with set_text. Remove with delete_node. Images: upload_image "
-        "returns asset details; set_frame_image uploads-and-paints in one call. Ship: publish "
-        "creates a preview deployment; deploy promotes a deployment to the production domains. "
-        "Translation hint: walk HTML, map <div>/<section> to create_frame, <h1>-<h6>/<p> to "
-        "create_text_node with attributes.tag, <img> to set_frame_image on a freshly created frame."
+        "Tools to build, inspect, and ship pages in a Framer project via the Framer Server API. "
+        "READ: get_current_page, get_node, get_children, get_parent, get_rect, get_nodes_with_type, "
+        "get_project_info, get_publish_info, get_color_styles, get_text_styles, get_fonts, get_font, "
+        "get_locales, get_default_locale, get_code_files, get_code_file. "
+        "CREATE: create_web_page, create_design_page, create_frame, create_text_node, "
+        "create_color_style, create_text_style, create_code_file, clone_node, clone_web_page. "
+        "MUTATE: set_attributes (most powerful — change any editable trait by id), set_text, "
+        "set_parent, set_frame_image, set_custom_code (inject <script>/<link> in head/body), "
+        "add_redirects (URL rewrites), upload_image, delete_node. "
+        "VISUAL FEEDBACK: screenshot (returns PNG/JPEG bytes as base64), export_svg. "
+        "SHIP: publish (preview deployment), deploy (promote to production). "
+        "HTML translation hint: walk the HTML, map <div>/<section> -> create_frame, "
+        "<h1>-<h6>/<p> -> create_text_node with attributes.tag, <img> -> set_frame_image, "
+        "CSS layout -> set_attributes with stack/grid/gap/padding traits. Use screenshot to "
+        "self-verify what was rendered."
     ),
 )
 
@@ -312,6 +317,270 @@ async def deploy(deployment_id: str) -> str:
         deployment_id: A deployment id from a previous publish() call.
     """
     return await _call_sidecar("deploy", {"deployment_id": deployment_id})
+
+
+# --- v1.2 read tools -----------------------------------------------------
+
+@mcp.tool(name="get_node", annotations={"readOnlyHint": True, "destructiveHint": False})
+async def get_node(node_id: str) -> str:
+    """Get any canvas node by id (id, name, type, path if a Web Page)."""
+    return await _call_sidecar("get_node", {"node_id": node_id})
+
+
+@mcp.tool(name="get_children", annotations={"readOnlyHint": True, "destructiveHint": False})
+async def get_children(node_id: str) -> str:
+    """List the direct children of a node."""
+    return await _call_sidecar("get_children", {"node_id": node_id})
+
+
+@mcp.tool(name="get_parent", annotations={"readOnlyHint": True, "destructiveHint": False})
+async def get_parent(node_id: str) -> str:
+    """Get a node's parent."""
+    return await _call_sidecar("get_parent", {"node_id": node_id})
+
+
+@mcp.tool(name="get_rect", annotations={"readOnlyHint": True, "destructiveHint": False})
+async def get_rect(node_id: str) -> str:
+    """Get the bounding rect of a node ({x, y, width, height} in canvas coords)."""
+    return await _call_sidecar("get_rect", {"node_id": node_id})
+
+
+@mcp.tool(name="get_nodes_with_type", annotations={"readOnlyHint": True, "destructiveHint": False})
+async def get_nodes_with_type(type: str) -> str:
+    """
+    Find all nodes of a given class. Useful for "list every text node on the page" etc.
+
+    Args:
+        type: One of "FrameNode", "TextNode", "SVGNode", "ComponentInstanceNode",
+              "WebPageNode", "DesignPageNode", "ComponentNode".
+    """
+    return await _call_sidecar("get_nodes_with_type", {"type": type})
+
+
+# --- v1.2 manipulation tools ---------------------------------------------
+
+@mcp.tool(name="clone_node", annotations={"readOnlyHint": False, "destructiveHint": False})
+async def clone_node(node_id: str) -> str:
+    """Duplicate any node. Returns the new node's id."""
+    return await _call_sidecar("clone_node", {"node_id": node_id})
+
+
+@mcp.tool(name="clone_web_page", annotations={"readOnlyHint": False, "destructiveHint": False})
+async def clone_web_page(node_id: str) -> str:
+    """Duplicate a Web Page (its full canvas tree). Returns the new page's id and path."""
+    return await _call_sidecar("clone_web_page", {"node_id": node_id})
+
+
+@mcp.tool(
+    name="set_parent",
+    annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True},
+)
+async def set_parent(node_id: str, parent_id: str, index: Optional[int] = None) -> str:
+    """
+    Move a node to a new parent (or reorder among existing children).
+
+    Args:
+        node_id: Node to move.
+        parent_id: New parent.
+        index: Position among the parent's children (0-based). Omit for end.
+    """
+    args: dict[str, Any] = {"node_id": node_id, "parent_id": parent_id}
+    if index is not None:
+        args["index"] = index
+    return await _call_sidecar("set_parent", args)
+
+
+# --- v1.2 site settings tools --------------------------------------------
+
+@mcp.tool(name="add_redirects", annotations={"readOnlyHint": False, "destructiveHint": False})
+async def add_redirects(redirects: list[dict[str, Any]]) -> str:
+    """
+    Add URL rewrites. `from` paths can include `*` wildcards captured as `:1`, `:2` in `to`.
+
+    Args:
+        redirects: List of {from, to, expandToAllLocales?} entries. Example:
+            [{"from": "/business", "to": "/enterprise", "expandToAllLocales": true},
+             {"from": "/posts/*", "to": "/blog/:1"}]
+    """
+    return await _call_sidecar("add_redirects", {"redirects": redirects})
+
+
+@mcp.tool(
+    name="set_custom_code",
+    annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True},
+)
+async def set_custom_code(location: str, html: Optional[str] = None) -> str:
+    """
+    Install or clear a custom HTML/JS snippet at a fixed location in every page.
+
+    Args:
+        location: Where to inject. One of "headStart", "headEnd", "bodyStart", "bodyEnd".
+        html: HTML to install (e.g. <script src=...></script>). Pass None to clear.
+    """
+    return await _call_sidecar("set_custom_code", {"location": location, "html": html})
+
+
+# --- v1.2 design system tools --------------------------------------------
+
+@mcp.tool(name="get_color_styles", annotations={"readOnlyHint": True, "destructiveHint": False})
+async def get_color_styles() -> str:
+    """List all color styles in the project."""
+    return await _call_sidecar("get_color_styles", {})
+
+
+@mcp.tool(name="create_color_style", annotations={"readOnlyHint": False, "destructiveHint": False})
+async def create_color_style(attributes: dict[str, Any]) -> str:
+    """
+    Create a reusable color style.
+
+    Args:
+        attributes: ColorStyleAttributes — at minimum {name, light}. Optional dark mode value.
+            Example: {"name": "Brand Primary", "light": "#3b82f6", "dark": "#60a5fa"}
+    """
+    return await _call_sidecar("create_color_style", {"attributes": attributes})
+
+
+@mcp.tool(name="get_text_styles", annotations={"readOnlyHint": True, "destructiveHint": False})
+async def get_text_styles() -> str:
+    """List all text styles (typography presets) in the project."""
+    return await _call_sidecar("get_text_styles", {})
+
+
+@mcp.tool(name="create_text_style", annotations={"readOnlyHint": False, "destructiveHint": False})
+async def create_text_style(attributes: dict[str, Any]) -> str:
+    """
+    Create a reusable text style.
+
+    Args:
+        attributes: TextStyleAttributes — name + typography (font, fontSize, lineHeight,
+            letterSpacing, transform, alignment, decoration, tag).
+    """
+    return await _call_sidecar("create_text_style", {"attributes": attributes})
+
+
+@mcp.tool(name="get_fonts", annotations={"readOnlyHint": True, "destructiveHint": False})
+async def get_fonts() -> str:
+    """List all fonts available to the project (one entry per family/weight/style combo)."""
+    return await _call_sidecar("get_fonts", {})
+
+
+@mcp.tool(name="get_font", annotations={"readOnlyHint": True, "destructiveHint": False})
+async def get_font(family: str, weight: Optional[int] = None, style: Optional[str] = None) -> str:
+    """
+    Look up a specific font by family + optional weight/style.
+
+    Args:
+        family: Font family name (e.g. "Inter", "Noto Sans"). Case-insensitive.
+        weight: Numeric weight (e.g. 400, 700). Defaults to normal.
+        style: "normal" or "italic". Defaults to "normal".
+    """
+    args: dict[str, Any] = {"family": family}
+    if weight is not None:
+        args["weight"] = weight
+    if style is not None:
+        args["style"] = style
+    return await _call_sidecar("get_font", args)
+
+
+# --- v1.2 project + visual feedback tools --------------------------------
+
+@mcp.tool(name="get_project_info", annotations={"readOnlyHint": True, "destructiveHint": False})
+async def get_project_info() -> str:
+    """Get project name, id, and api version 1 id."""
+    return await _call_sidecar("get_project_info", {})
+
+
+@mcp.tool(name="get_publish_info", annotations={"readOnlyHint": True, "destructiveHint": False})
+async def get_publish_info() -> str:
+    """Get current production + staging deployment info (urls, deployment time, optimization status)."""
+    return await _call_sidecar("get_publish_info", {})
+
+
+@mcp.tool(name="screenshot", annotations={"readOnlyHint": True, "destructiveHint": False})
+async def screenshot(
+    node_id: str,
+    format: Optional[str] = None,
+    scale: Optional[float] = None,
+) -> str:
+    """
+    Capture a PNG/JPEG of any canvas node. Returns base64-encoded bytes.
+
+    Args:
+        node_id: Node to screenshot.
+        format: "png" (default) or "jpeg".
+        scale: Pixel-density multiplier — 0.5, 1, 1.5, 2, 3, or 4. Default 1.
+    """
+    args: dict[str, Any] = {"node_id": node_id}
+    if format is not None:
+        args["format"] = format
+    if scale is not None:
+        args["scale"] = scale
+    return await _call_sidecar("screenshot", args)
+
+
+@mcp.tool(name="export_svg", annotations={"readOnlyHint": True, "destructiveHint": False})
+async def export_svg(node_id: str) -> str:
+    """Export a node as an SVG string."""
+    return await _call_sidecar("export_svg", {"node_id": node_id})
+
+
+# --- v1.2 locale tools ---------------------------------------------------
+
+@mcp.tool(name="get_locales", annotations={"readOnlyHint": True, "destructiveHint": False})
+async def get_locales() -> str:
+    """List all locales in the project (excludes the default locale)."""
+    return await _call_sidecar("get_locales", {})
+
+
+@mcp.tool(name="get_default_locale", annotations={"readOnlyHint": True, "destructiveHint": False})
+async def get_default_locale() -> str:
+    """Get the project's default locale."""
+    return await _call_sidecar("get_default_locale", {})
+
+
+@mcp.tool(name="get_active_locale", annotations={"readOnlyHint": True, "destructiveHint": False})
+async def get_active_locale() -> str:
+    """
+    Get the currently active locale. NOTE: This method is plugin-only in framer-api 0.1.7
+    and will return a `not_supported_via_framer_api` error from the sidecar. Use
+    get_default_locale + get_locales instead.
+    """
+    return await _call_sidecar("get_active_locale", {})
+
+
+# --- v1.2 code file tools ------------------------------------------------
+
+@mcp.tool(name="create_code_file", annotations={"readOnlyHint": False, "destructiveHint": False})
+async def create_code_file(name: str, code: str, edit_via_plugin: Optional[bool] = None) -> str:
+    """
+    Create a new code file (React component / override) in the project.
+
+    Args:
+        name: Filename including extension. Use `.tsx` for components.
+        code: Source code (typically a default export).
+        edit_via_plugin: When True, the "Edit Code" UI action opens this plugin. Optional.
+    """
+    args: dict[str, Any] = {"name": name, "code": code}
+    if edit_via_plugin is not None:
+        args["edit_via_plugin"] = edit_via_plugin
+    return await _call_sidecar("create_code_file", args)
+
+
+@mcp.tool(name="get_code_files", annotations={"readOnlyHint": True, "destructiveHint": False})
+async def get_code_files() -> str:
+    """List all code files in the project (id, name, path, content)."""
+    return await _call_sidecar("get_code_files", {})
+
+
+@mcp.tool(name="get_code_file", annotations={"readOnlyHint": True, "destructiveHint": False})
+async def get_code_file(id: str) -> str:
+    """
+    Fetch a specific code file by id.
+
+    Args:
+        id: The code file id (from get_code_files or create_code_file).
+    """
+    return await _call_sidecar("get_code_file", {"id": id})
 
 
 # --- OAuth 2.0 with PKCE (synthetic — issues MCP_API_KEY as access_token) ---
