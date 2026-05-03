@@ -99,6 +99,44 @@ function serializeCodeFile(cf: unknown): Record<string, unknown> | null {
     return out;
 }
 
+function serializeCollection(c: unknown): Record<string, unknown> | null {
+    if (!c || typeof c !== "object") return null;
+    const o = c as Record<string, unknown>;
+    return {
+        id: o["id"] ?? null,
+        name: o["name"] ?? null,
+        // Surface plugin-managed flag if present
+        managed_by: o["managedBy"] ?? null,
+        readonly: o["readonly"] ?? null,
+    };
+}
+
+function serializeCollectionField(f: unknown): Record<string, unknown> | null {
+    if (!f || typeof f !== "object") return null;
+    const o = f as Record<string, unknown>;
+    const out: Record<string, unknown> = {
+        id: o["id"] ?? null,
+        name: o["name"] ?? null,
+        type: o["type"] ?? null,
+    };
+    // Some fields have additional scalar metadata — surface a few common ones.
+    for (const k of ["userEditable", "cases", "collectionId"]) {
+        if (o[k] !== undefined) out[k] = o[k];
+    }
+    return out;
+}
+
+function serializeCollectionItem(it: unknown): Record<string, unknown> | null {
+    if (!it || typeof it !== "object") return null;
+    const o = it as Record<string, unknown>;
+    return {
+        id: o["id"] ?? null,
+        slug: o["slug"] ?? null,
+        // fieldData is a record of field_id -> { type, value } typically
+        field_data: o["fieldData"] ?? null,
+    };
+}
+
 const app = new Hono();
 
 // Internal-key guard: skip /health, require X-Sidecar-Key on everything else.
@@ -930,6 +968,170 @@ app.post("/tools/get_code_file", async (c) => {
         const f = await getFramer();
         const cf = await f.getCodeFile(id);
         return c.json({ ok: true, result: serializeCodeFile(cf) });
+    } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return c.json({ ok: false, error: msg }, 500);
+    }
+});
+
+app.post("/tools/get_collections", async (c) => {
+    try {
+        const f = await getFramer();
+        const cols = await f.getCollections();
+        return c.json({ ok: true, result: cols.map(serializeCollection) });
+    } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return c.json({ ok: false, error: msg }, 500);
+    }
+});
+
+app.post("/tools/get_collection", async (c) => {
+    let body: { id?: unknown };
+    try { body = await c.req.json(); } catch { return c.json({ ok: false, error: "invalid_json" }, 400); }
+    const id = body.id;
+    if (typeof id !== "string" || !id) {
+        return c.json({ ok: false, error: "missing_or_invalid_id" }, 400);
+    }
+    try {
+        const f = await getFramer();
+        const col = await f.getCollection(id);
+        return c.json({ ok: true, result: serializeCollection(col) });
+    } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return c.json({ ok: false, error: msg }, 500);
+    }
+});
+
+app.post("/tools/get_collection_fields", async (c) => {
+    let body: { collection_id?: unknown };
+    try { body = await c.req.json(); } catch { return c.json({ ok: false, error: "invalid_json" }, 400); }
+    const cid = body.collection_id;
+    if (typeof cid !== "string" || !cid) {
+        return c.json({ ok: false, error: "missing_or_invalid_collection_id" }, 400);
+    }
+    try {
+        const f = await getFramer();
+        const col = await f.getCollection(cid);
+        if (!col) return c.json({ ok: false, error: "collection_not_found" }, 404);
+        const fields = await col.getFields();
+        return c.json({ ok: true, result: fields.map(serializeCollectionField) });
+    } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return c.json({ ok: false, error: msg }, 500);
+    }
+});
+
+app.post("/tools/get_collection_items", async (c) => {
+    let body: { collection_id?: unknown };
+    try { body = await c.req.json(); } catch { return c.json({ ok: false, error: "invalid_json" }, 400); }
+    const cid = body.collection_id;
+    if (typeof cid !== "string" || !cid) {
+        return c.json({ ok: false, error: "missing_or_invalid_collection_id" }, 400);
+    }
+    try {
+        const f = await getFramer();
+        const col = await f.getCollection(cid);
+        if (!col) return c.json({ ok: false, error: "collection_not_found" }, 404);
+        const items = await col.getItems();
+        return c.json({ ok: true, result: items.map(serializeCollectionItem) });
+    } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return c.json({ ok: false, error: msg }, 500);
+    }
+});
+
+app.post("/tools/create_collection", async (c) => {
+    let body: { name?: unknown };
+    try { body = await c.req.json(); } catch { return c.json({ ok: false, error: "invalid_json" }, 400); }
+    const name = body.name;
+    if (typeof name !== "string" || !name) {
+        return c.json({ ok: false, error: "missing_or_invalid_name" }, 400);
+    }
+    try {
+        const f = await getFramer();
+        const col = await f.createCollection(name);
+        return c.json({ ok: true, result: serializeCollection(col) });
+    } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return c.json({ ok: false, error: msg }, 500);
+    }
+});
+
+app.post("/tools/add_collection_fields", async (c) => {
+    let body: { collection_id?: unknown; fields?: unknown };
+    try { body = await c.req.json(); } catch { return c.json({ ok: false, error: "invalid_json" }, 400); }
+    const cid = body.collection_id;
+    const fields = body.fields;
+    if (typeof cid !== "string" || !cid) {
+        return c.json({ ok: false, error: "missing_or_invalid_collection_id" }, 400);
+    }
+    if (!Array.isArray(fields) || fields.length === 0) {
+        return c.json({ ok: false, error: "missing_or_invalid_fields (non-empty array)" }, 400);
+    }
+    // Light validation — each field needs at least `name` and `type`
+    for (const fd of fields as Array<Record<string, unknown>>) {
+        if (typeof fd["name"] !== "string" || typeof fd["type"] !== "string") {
+            return c.json({ ok: false, error: "each field needs string name + type" }, 400);
+        }
+    }
+    try {
+        const f = await getFramer();
+        const col = await f.getCollection(cid);
+        if (!col) return c.json({ ok: false, error: "collection_not_found" }, 404);
+        const added = await col.addFields(fields as Parameters<typeof col.addFields>[0]);
+        return c.json({ ok: true, result: added.map(serializeCollectionField) });
+    } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return c.json({ ok: false, error: msg }, 500);
+    }
+});
+
+app.post("/tools/add_collection_items", async (c) => {
+    let body: { collection_id?: unknown; items?: unknown };
+    try { body = await c.req.json(); } catch { return c.json({ ok: false, error: "invalid_json" }, 400); }
+    const cid = body.collection_id;
+    const items = body.items;
+    if (typeof cid !== "string" || !cid) {
+        return c.json({ ok: false, error: "missing_or_invalid_collection_id" }, 400);
+    }
+    if (!Array.isArray(items) || items.length === 0) {
+        return c.json({ ok: false, error: "missing_or_invalid_items (non-empty array)" }, 400);
+    }
+    // Light validation — each item needs at least a `slug`
+    for (const it of items as Array<Record<string, unknown>>) {
+        if (typeof it["slug"] !== "string" || !it["slug"]) {
+            return c.json({ ok: false, error: "each item needs string slug" }, 400);
+        }
+    }
+    try {
+        const f = await getFramer();
+        const col = await f.getCollection(cid);
+        if (!col) return c.json({ ok: false, error: "collection_not_found" }, 404);
+        await col.addItems(items as Parameters<typeof col.addItems>[0]);
+        return c.json({ ok: true, result: { added: items.length } });
+    } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return c.json({ ok: false, error: msg }, 500);
+    }
+});
+
+app.post("/tools/remove_collection_items", async (c) => {
+    let body: { collection_id?: unknown; item_ids?: unknown };
+    try { body = await c.req.json(); } catch { return c.json({ ok: false, error: "invalid_json" }, 400); }
+    const cid = body.collection_id;
+    const itemIds = body.item_ids;
+    if (typeof cid !== "string" || !cid) {
+        return c.json({ ok: false, error: "missing_or_invalid_collection_id" }, 400);
+    }
+    if (!Array.isArray(itemIds) || itemIds.length === 0 || !itemIds.every((x) => typeof x === "string")) {
+        return c.json({ ok: false, error: "missing_or_invalid_item_ids (non-empty string array)" }, 400);
+    }
+    try {
+        const f = await getFramer();
+        const col = await f.getCollection(cid);
+        if (!col) return c.json({ ok: false, error: "collection_not_found" }, 404);
+        await col.removeItems(itemIds as string[]);
+        return c.json({ ok: true, result: { removed: itemIds.length } });
     } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         return c.json({ ok: false, error: msg }, 500);
