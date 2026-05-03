@@ -68,6 +68,54 @@ function errResponse(c: Context, err: unknown) {
     return c.json({ ok: false, error: msg }, 500);
 }
 
+// Resolve attribute fields that Framer's plugin API expects as real class
+// instances (TextStyle, Font, etc.) but that arrive over JSON as bare ID
+// strings or plain objects. Without this, set_attributes silently no-ops on
+// inlineTextStyle, and createTextStyle stores a null font.
+async function resolveAttributes(
+    f: Framer,
+    attrs: Record<string, unknown>,
+): Promise<Record<string, unknown>> {
+    const out: Record<string, unknown> = { ...attrs };
+
+    // inlineTextStyle: a string ID -> real TextStyle object
+    const its = out["inlineTextStyle"];
+    if (typeof its === "string" && its) {
+        const ts = await f.getTextStyle(its);
+        if (ts) out["inlineTextStyle"] = ts;
+    } else if (its && typeof its === "object" && typeof (its as { id?: unknown }).id === "string"
+               && !((its as { selector?: unknown }).selector)) {
+        const ts = await f.getTextStyle((its as { id: string }).id);
+        if (ts) out["inlineTextStyle"] = ts;
+    }
+
+    // font: plain object {family, weight?, style?} -> real Font via getFont.
+    // A real Font from framer-api carries a `selector` field; user-supplied
+    // plain objects do not, which is how we tell them apart.
+    const font = out["font"];
+    if (font && typeof font === "object") {
+        const fobj = font as Record<string, unknown>;
+        const isPlain = !fobj["selector"] && typeof fobj["family"] === "string";
+        if (isPlain) {
+            const family = fobj["family"] as string;
+            const fontArgs: Record<string, unknown> = {};
+            if (typeof fobj["weight"] === "number") fontArgs["weight"] = fobj["weight"];
+            if (fobj["style"] === "italic" || fobj["style"] === "normal") {
+                fontArgs["style"] = fobj["style"];
+            }
+            const resolved = await f.getFont(
+                family,
+                Object.keys(fontArgs).length
+                    ? (fontArgs as Parameters<typeof f.getFont>[1])
+                    : undefined,
+            );
+            if (resolved) out["font"] = resolved;
+        }
+    }
+
+    return out;
+}
+
 // Flatten any AnyNode to a JSON-safe shape for tool responses.
 function serializeNode(n: unknown): Record<string, unknown> | null {
     if (!n || typeof n !== "object") return null;
@@ -253,8 +301,9 @@ app.post("/tools/create_text_node", async (c) => {
 
     try {
         const f = await getFramer();
+        const resolved = await resolveAttributes(f, attributes);
         const node = await f.createTextNode(
-            attributes as Parameters<typeof f.createTextNode>[0],
+            resolved as Parameters<typeof f.createTextNode>[0],
             parentId,
         );
         if (!node) {
@@ -301,8 +350,9 @@ app.post("/tools/create_frame", async (c) => {
 
     try {
         const f = await getFramer();
+        const resolved = await resolveAttributes(f, attributes);
         const node = await f.createFrameNode(
-            attributes as Parameters<typeof f.createFrameNode>[0],
+            resolved as Parameters<typeof f.createFrameNode>[0],
             parentId,
         );
         if (!node) {
@@ -331,9 +381,10 @@ app.post("/tools/set_attributes", async (c) => {
     }
     try {
         const f = await getFramer();
+        const resolved = await resolveAttributes(f, attributes as Record<string, unknown>);
         const node = await f.setAttributes(
             nodeId,
-            attributes as Parameters<typeof f.setAttributes>[1],
+            resolved as Parameters<typeof f.setAttributes>[1],
         );
         if (!node) {
             return c.json({ ok: false, error: "setAttributes returned null" }, 500);
@@ -776,7 +827,8 @@ app.post("/tools/create_text_style", async (c) => {
     }
     try {
         const f = await getFramer();
-        const style = await f.createTextStyle(attrs as Parameters<typeof f.createTextStyle>[0]);
+        const resolved = await resolveAttributes(f, attrs as Record<string, unknown>);
+        const style = await f.createTextStyle(resolved as Parameters<typeof f.createTextStyle>[0]);
         return c.json({ ok: true, result: serializeTextStyle(style) });
     } catch (err) {
         return errResponse(c, err);
