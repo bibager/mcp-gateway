@@ -1,4 +1,4 @@
-import { connect, type Framer, isFrameNode, isTextNode } from "framer-api";
+import { connect, type Framer, isFrameNode, isTextNode, isWebPageNode } from "framer-api";
 import { Hono } from "hono";
 import { serve } from "@hono/node-server";
 
@@ -482,6 +482,123 @@ app.post("/tools/get_nodes_with_type", async (c) => {
         const f = await getFramer();
         const nodes = await (f.getNodesWithType as (t: string) => Promise<unknown[]>)(type);
         return c.json({ ok: true, result: nodes.map(serializeNode) });
+    } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return c.json({ ok: false, error: msg }, 500);
+    }
+});
+
+app.post("/tools/clone_node", async (c) => {
+    let body: { node_id?: unknown };
+    try { body = await c.req.json(); } catch { return c.json({ ok: false, error: "invalid_json" }, 400); }
+    const nodeId = body.node_id;
+    if (typeof nodeId !== "string" || !nodeId) {
+        return c.json({ ok: false, error: "missing_or_invalid_node_id" }, 400);
+    }
+    try {
+        const f = await getFramer();
+        const cloned = await f.cloneNode(nodeId);
+        return c.json({ ok: true, result: serializeNode(cloned) });
+    } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return c.json({ ok: false, error: msg }, 500);
+    }
+});
+
+app.post("/tools/clone_web_page", async (c) => {
+    let body: { node_id?: unknown };
+    try { body = await c.req.json(); } catch { return c.json({ ok: false, error: "invalid_json" }, 400); }
+    const nodeId = body.node_id;
+    if (typeof nodeId !== "string" || !nodeId) {
+        return c.json({ ok: false, error: "missing_or_invalid_node_id" }, 400);
+    }
+    try {
+        const f = await getFramer();
+        const node = await f.getNode(nodeId);
+        if (!node) {
+            return c.json({ ok: false, error: "node_not_found" }, 404);
+        }
+        if (!isWebPageNode(node)) {
+            return c.json({ ok: false, error: "node_is_not_a_web_page_node" }, 400);
+        }
+        const page = await node.clone();
+        return c.json({ ok: true, result: serializeNode(page) });
+    } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return c.json({ ok: false, error: msg }, 500);
+    }
+});
+
+app.post("/tools/set_parent", async (c) => {
+    let body: { node_id?: unknown; parent_id?: unknown; index?: unknown };
+    try { body = await c.req.json(); } catch { return c.json({ ok: false, error: "invalid_json" }, 400); }
+    const nodeId = body.node_id;
+    const parentId = body.parent_id;
+    if (typeof nodeId !== "string" || !nodeId) {
+        return c.json({ ok: false, error: "missing_or_invalid_node_id" }, 400);
+    }
+    if (typeof parentId !== "string" || !parentId) {
+        return c.json({ ok: false, error: "missing_or_invalid_parent_id" }, 400);
+    }
+    const index = typeof body.index === "number" ? body.index : undefined;
+    try {
+        const f = await getFramer();
+        await f.setParent(nodeId, parentId, index);
+        return c.json({ ok: true, result: { ok: true } });
+    } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return c.json({ ok: false, error: msg }, 500);
+    }
+});
+
+app.post("/tools/add_redirects", async (c) => {
+    let body: { redirects?: unknown };
+    try { body = await c.req.json(); } catch { return c.json({ ok: false, error: "invalid_json" }, 400); }
+    const list = body.redirects;
+    if (!Array.isArray(list) || list.length === 0) {
+        return c.json({ ok: false, error: "missing_or_invalid_redirects (must be non-empty array)" }, 400);
+    }
+    // Light validation — each entry must have string `from` and `to`. expandToAllLocales is optional.
+    for (const r of list as Array<Record<string, unknown>>) {
+        if (typeof r["from"] !== "string" || typeof r["to"] !== "string") {
+            return c.json({ ok: false, error: "each redirect must have string from + to" }, 400);
+        }
+    }
+    try {
+        const f = await getFramer();
+        const added = await f.addRedirects(list as Parameters<typeof f.addRedirects>[0]);
+        return c.json({
+            ok: true,
+            result: added.map((r) => ({
+                id: r.id,
+                from: r.from,
+                to: r.to,
+                expandToAllLocales: r.expandToAllLocales ?? false,
+            })),
+        });
+    } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return c.json({ ok: false, error: msg }, 500);
+    }
+});
+
+app.post("/tools/set_custom_code", async (c) => {
+    let body: { html?: unknown; location?: unknown };
+    try { body = await c.req.json(); } catch { return c.json({ ok: false, error: "invalid_json" }, 400); }
+    // html may be null (clears the snippet) or a string.
+    const html = body.html;
+    const location = body.location;
+    const validLocations = ["headStart", "headEnd", "bodyStart", "bodyEnd"];
+    if (typeof location !== "string" || !validLocations.includes(location)) {
+        return c.json({ ok: false, error: `invalid_location — must be one of ${validLocations.join(", ")}` }, 400);
+    }
+    if (html !== null && typeof html !== "string") {
+        return c.json({ ok: false, error: "html must be a string or null" }, 400);
+    }
+    try {
+        const f = await getFramer();
+        await f.setCustomCode({ html, location } as Parameters<typeof f.setCustomCode>[0]);
+        return c.json({ ok: true, result: { ok: true, location, cleared: html === null } });
     } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         return c.json({ ok: false, error: msg }, 500);
