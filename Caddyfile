@@ -40,6 +40,12 @@
         reverse_proxy localhost:8007
     }
 
+    # --- Pacvue MCP: pacvue.bibager.com ---
+    @pacvue header Host pacvue.bibager.com
+    handle @pacvue {
+        reverse_proxy localhost:8008
+    }
+
     # --- GA MCP: mcp.bibager.com/ga/* and root OAuth ---
     @ga_path path /ga/*
     handle @ga_path {
@@ -76,6 +82,10 @@
 
     handle_path /framer/* {
         reverse_proxy localhost:8007
+    }
+
+    handle_path /pacvue/* {
+        reverse_proxy localhost:8008
     }
 
     handle {

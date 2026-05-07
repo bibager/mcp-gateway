@@ -17,8 +17,9 @@ Internet → Caddy (port 8080) → Service routing by host/path
                 ├── gitlab.bibager.com   → GitLab repo MCP   (port 8003, Python)
                 ├── weather.bibager.com  → Weather           (port 8004, Python)
                 ├── trackiq.bibager.com  → TrackIQ proxy     (port 8005, Python)
-                └── framer.bibager.com   → Framer MCP        (port 8007 frontend → 8006 sidecar)
-                                              Python frontend ─▶ Node 22 sidecar ─▶ Framer Server API
+                ├── framer.bibager.com   → Framer MCP        (port 8007 frontend → 8006 sidecar)
+                │                             Python frontend ─▶ Node 22 sidecar ─▶ Framer Server API
+                └── pacvue.bibager.com   → Pacvue proxy      (port 8008, Python)
 ```
 
 ### Key Files
@@ -27,7 +28,7 @@ Internet → Caddy (port 8080) → Service routing by host/path
 ├── Caddyfile              # Reverse proxy routing rules
 ├── Dockerfile             # Python 3.12-slim + Node 22 + Caddy + Supervisor
 ├── docker-compose.yml     # Single service, port 8080, .env file
-├── supervisord.conf       # Process management (8 programs: caddy + 7 services + framer's 2)
+├── supervisord.conf       # Process management (10 programs: caddy + 8 services + framer's 2)
 ├── .env.example           # Environment variable template
 ├── docs/plans/            # Design + implementation plans (Framer build, etc.)
 └── services/
@@ -40,12 +41,13 @@ Internet → Caddy (port 8080) → Service routing by host/path
     ├── gitlab/server.py
     ├── weather/server.py  # Open-Meteo wrapper, no API key
     ├── trackiq/server.py  # HTTP-streaming proxy to app.trackiq.com/mcp
-    └── framer/            # Polyglot — Python frontend + Node sidecar
-        ├── server.py      # Python FastMCP frontend (auth, OAuth, MCP tools)
-        ├── src/sidecar.ts # Node sidecar holding the framer-api WebSocket
-        ├── package.json
-        ├── tsconfig.json
-        └── requirements.txt
+    ├── framer/            # Polyglot — Python frontend + Node sidecar
+    │   ├── server.py      # Python FastMCP frontend (auth, OAuth, MCP tools)
+    │   ├── src/sidecar.ts # Node sidecar holding the framer-api WebSocket
+    │   ├── package.json
+    │   ├── tsconfig.json
+    │   └── requirements.txt
+    └── pacvue/server.py   # HTTP-streaming proxy to mcp.pacvue.com/mcp
 ```
 
 ## Services
@@ -112,6 +114,13 @@ Internet → Caddy (port 8080) → Service routing by host/path
   - **Ship**: `publish()`, `deploy(deployment_id)`
 - **OAuth**: Synthetic
 
+### Pacvue (port 8008)
+- **Purpose**: Amazon/Walmart/Instacart/Kroger/DoorDash/Sam's/Target/Criteo/Citrus/Chewy/Bol retail-media reporting via the Pacvue Console
+- **Auth**: `PACVUE_API_KEY` env var (raw `pv_…` token, NO `Bearer` prefix — Pacvue spec is `Authorization: pv_<token>`)
+- **Architecture**: Transparent HTTP-streaming proxy to `mcp.pacvue.com/mcp` (same pattern as TrackIQ); we just rewrite `Authorization`. The MCP session lives directly between Claude and Pacvue.
+- **MCP Tools**: 5 (forwarded from Pacvue) — `fetch_report_list`, `fetch_report_schema`, `fetch_materials`, `run_report`, `fetch_report_result`. Async report flow: `run_report` returns `taskId`, `fetch_report_result` polls. Hard caps: 50k rows, 24h download URL, 24h taskId, 50 active tokens, 180-day token lifetime.
+- **OAuth**: Synthetic at our side
+
 ## Routing (Caddyfile)
 
 Host-based routing takes priority (prevents cross-domain OAuth hijack):
@@ -121,9 +130,10 @@ Host-based routing takes priority (prevents cross-domain OAuth hijack):
 4. `weather.bibager.com` → 8004
 5. `trackiq.bibager.com` → 8005
 6. `framer.bibager.com` → 8007 (Python frontend; sidecar at 8006 is localhost-only)
-7. GA OAuth endpoints (`/.well-known/*`, `/authorize`, `/token`, etc.) → 8002
-8. Path-based fallbacks: `/ga/*`, `/monarch/*`, `/todoist/*`, `/gitlab/*`, `/weather/*`, `/trackiq/*`, `/framer/*`
-9. Default: 404
+7. `pacvue.bibager.com` → 8008
+8. GA OAuth endpoints (`/.well-known/*`, `/authorize`, `/token`, etc.) → 8002
+9. Path-based fallbacks: `/ga/*`, `/monarch/*`, `/todoist/*`, `/gitlab/*`, `/weather/*`, `/trackiq/*`, `/framer/*`, `/pacvue/*`
+10. Default: 404
 
 ## Environment Variables
 
@@ -147,6 +157,7 @@ Host-based routing takes priority (prevents cross-domain OAuth hijack):
 | `FRAMER_API_KEY` | Framer | Framer Server API key (project-scoped, from Site Settings) |
 | `FRAMER_PROJECT_URL` | Framer | Target Framer project URL (e.g. `https://framer.com/projects/<slug-id>`) |
 | `SIDECAR_INTERNAL_KEY` | Framer | Localhost shared secret between Python frontend and Node sidecar |
+| `PACVUE_API_KEY` | Pacvue | Upstream Pacvue API token (raw `pv_…`, no Bearer prefix) |
 | `SERVER_URL` | All | Per-service base URL override (e.g. `https://framer.bibager.com`) |
 
 ## Conventions
@@ -161,7 +172,7 @@ Host-based routing takes priority (prevents cross-domain OAuth hijack):
 ## Deployment
 
 - **Platform**: DigitalOcean App Platform (app id `02a49797-290a-42fa-b71c-2d5dbe4fe107`)
-- **Instance**: `apps-s-1vcpu-1gb` (~$12/mo) — has headroom for all 7 services
+- **Instance**: `apps-s-1vcpu-1gb` (~$12/mo) — has headroom for all 8 services
 - **Git**: Deploys from `origin/main` on push. Local work happens on `master`; push to main with `git push origin master:main`.
 - **CLI**: `doctl` is available and authenticated for spec updates and log inspection.
 - **DNS**: Each subdomain has a Cloudflare CNAME (DNS-only, gray cloud) pointing at `mcp-gateway-pph44.ondigitalocean.app`. Add a new subdomain by (1) registering it as an `ALIAS` domain on the DO app, (2) adding the CNAME in Cloudflare.
@@ -192,6 +203,7 @@ Daily 9:00am CST. Cron → Todoist (P1+P2) → format → Claude Haiku → Gmail
 - **Framer v1.1** (May 2026): 12 tools total. Frame creation, layout traits, text mutation, image upload+paint, publish/deploy. Live integration verified end-to-end against TrackIQ-V2 project.
 - **Framer v1.2** (May 2026): 38 tools total. Added tree navigation (get_node/get_children/get_parent/get_rect/get_nodes_with_type), node manipulation (clone_node/clone_web_page/set_parent), site settings (add_redirects/set_custom_code), design system (color/text styles + fonts), visual feedback (screenshot/export_svg), project info, locales, and code files.
 - **Framer v1.3** (May 2026): 46 tools total. Added CMS data plane via the `Collection` class — list/create collections, add/list fields, add/list/remove items. End-to-end verified by creating a "Claude CMS Test" collection in TrackIQ V2 with Title (string) + Body (formattedText) fields and 2 populated items.
+- **Pacvue proxy** (May 2026): HTTP-streaming proxy to `mcp.pacvue.com/mcp`, 5 tools (report list/schema, materials, run/fetch). Mirrors the TrackIQ proxy pattern but uses raw `pv_<token>` (no `Bearer` prefix) per Pacvue spec.
 
 ## Open follow-ups
 
