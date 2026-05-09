@@ -20,8 +20,10 @@ Internet → Caddy (port 8080) → Service routing by host/path
                 ├── framer.bibager.com   → Framer MCP        (port 8007 frontend → 8006 sidecar)
                 │                             Python frontend ─▶ Node 22 sidecar ─▶ Framer Server API
                 ├── pacvue.bibager.com   → Pacvue proxy      (port 8008, Python)
-                └── alpaca.bibager.com   → Alpaca trading    (port 8009 proxy → 8010 alpaca-mcp-server, Python)
-                                              Bearer-guarded proxy ─▶ localhost-only FastMCP ─▶ Alpaca API
+                ├── alpaca.bibager.com   → Alpaca trading    (port 8009 proxy → 8010 alpaca-mcp-server, Python)
+                │                             Bearer-guarded proxy ─▶ localhost-only FastMCP ─▶ Alpaca API
+                └── ta.bibager.com       → Technical analysis (port 8011, Python)
+                                              Pivots, VWAP, Volume Profile computed locally from Alpaca data
 ```
 
 ### Key Files
@@ -30,7 +32,7 @@ Internet → Caddy (port 8080) → Service routing by host/path
 ├── Caddyfile              # Reverse proxy routing rules
 ├── Dockerfile             # Python 3.12-slim + Node 22 + Caddy + Supervisor
 ├── docker-compose.yml     # Single service, port 8080, .env file
-├── supervisord.conf       # Process management (12 programs: caddy + 9 services + framer's 2 + alpaca's 2)
+├── supervisord.conf       # Process management (13 programs: caddy + 10 services + framer's 2 + alpaca's 2)
 ├── .env.example           # Environment variable template
 ├── docs/plans/            # Design + implementation plans (Framer build, etc.)
 └── services/
@@ -50,7 +52,8 @@ Internet → Caddy (port 8080) → Service routing by host/path
     │   ├── tsconfig.json
     │   └── requirements.txt
     ├── pacvue/server.py   # HTTP-streaming proxy to mcp.pacvue.com/mcp
-    └── alpaca/server.py   # Bearer-guarded proxy to localhost alpaca-mcp-server (live trading)
+    ├── alpaca/server.py   # Bearer-guarded proxy to localhost alpaca-mcp-server (live trading)
+    └── ta/server.py       # Technical analysis (pivots, VWAP, volume profile) over Alpaca data
 ```
 
 ## Services
@@ -132,6 +135,18 @@ Internet → Caddy (port 8080) → Service routing by host/path
 - **OAuth**: Synthetic at our side
 - **⚠ Live trading**: tool calls move real money. `ALPACA_PAPER_TRADE` must be flipped to `true` to switch to the simulator.
 
+### TA / Technical Analysis (port 8011)
+- **Purpose**: Compute pivot points, session VWAP, anchored VWAP, and volume profile (POC/VAH/VAL) locally from Alpaca's bar data — same numbers as TradingView Premium indicators, no licensing or scraping involved.
+- **Auth**: Reuses `ALPACA_API_KEY` + `ALPACA_SECRET_KEY` (DO env vars are app-scoped, all programs see them)
+- **Architecture**: Native FastMCP service (no proxy layer). Uses `alpaca-py` SDK directly to fetch daily/minute bars, then runs pure-Python math for the indicators.
+- **MCP Tools (4)**:
+  - `get_pivot_points(symbol, type='standard'|'camarilla'|'woodie', session_date?)` — P, R1-R4, S1-S4 from prior session H/L/C
+  - `get_session_vwap(symbol, session='regular'|'extended', session_date?, timeframe='1Min'|'5Min')` — single-session VWAP
+  - `get_anchored_vwap(symbol, anchor_date, anchor_time?='09:30', end_date?, timeframe?)` — cumulative VWAP from anchor point with daily snapshots
+  - `get_volume_profile(symbol, session_date?, session?, value_area_pct=70, num_buckets=50)` — POC, VAH, VAL + price-volume histogram (uniform per-bar distribution)
+- **OAuth**: Synthetic at our side
+- **Caveat**: Volume Profile uses minute-bar uniform distribution (good approximation; tick-data version possible later via `get_stock_trades`). Pivot computation doesn't account for US market holidays — pass an explicit `session_date` if accuracy around holidays matters.
+
 ## Routing (Caddyfile)
 
 Host-based routing takes priority (prevents cross-domain OAuth hijack):
@@ -143,9 +158,10 @@ Host-based routing takes priority (prevents cross-domain OAuth hijack):
 6. `framer.bibager.com` → 8007 (Python frontend; sidecar at 8006 is localhost-only)
 7. `pacvue.bibager.com` → 8008
 8. `alpaca.bibager.com` → 8009 (proxy; upstream alpaca-mcp-server on 8010 is localhost-only)
-9. GA OAuth endpoints (`/.well-known/*`, `/authorize`, `/token`, etc.) → 8002
-10. Path-based fallbacks: `/ga/*`, `/monarch/*`, `/todoist/*`, `/gitlab/*`, `/weather/*`, `/trackiq/*`, `/framer/*`, `/pacvue/*`, `/alpaca/*`
-11. Default: 404
+9. `ta.bibager.com` → 8011 (technical analysis service)
+10. GA OAuth endpoints (`/.well-known/*`, `/authorize`, `/token`, etc.) → 8002
+11. Path-based fallbacks: `/ga/*`, `/monarch/*`, `/todoist/*`, `/gitlab/*`, `/weather/*`, `/trackiq/*`, `/framer/*`, `/pacvue/*`, `/alpaca/*`, `/ta/*`
+12. Default: 404
 
 ## Environment Variables
 
@@ -187,7 +203,7 @@ Host-based routing takes priority (prevents cross-domain OAuth hijack):
 ## Deployment
 
 - **Platform**: DigitalOcean App Platform (app id `02a49797-290a-42fa-b71c-2d5dbe4fe107`)
-- **Instance**: `apps-s-1vcpu-1gb` (~$12/mo) — has headroom for all 9 services
+- **Instance**: `apps-s-1vcpu-1gb` (~$12/mo) — has headroom for all 10 services
 - **Git**: Deploys from `origin/main` on push. Local work happens on `master`; push to main with `git push origin master:main`.
 - **CLI**: `doctl` is available and authenticated for spec updates and log inspection.
 - **DNS**: Each subdomain has a Cloudflare CNAME (DNS-only, gray cloud) pointing at `mcp-gateway-pph44.ondigitalocean.app`. Add a new subdomain by (1) registering it as an `ALIAS` domain on the DO app, (2) adding the CNAME in Cloudflare.
@@ -219,7 +235,8 @@ Daily 9:00am CST. Cron → Todoist (P1+P2) → format → Claude Haiku → Gmail
 - **Framer v1.2** (May 2026): 38 tools total. Added tree navigation (get_node/get_children/get_parent/get_rect/get_nodes_with_type), node manipulation (clone_node/clone_web_page/set_parent), site settings (add_redirects/set_custom_code), design system (color/text styles + fonts), visual feedback (screenshot/export_svg), project info, locales, and code files.
 - **Framer v1.3** (May 2026): 46 tools total. Added CMS data plane via the `Collection` class — list/create collections, add/list fields, add/list/remove items. End-to-end verified by creating a "Claude CMS Test" collection in TrackIQ V2 with Title (string) + Body (formattedText) fields and 2 populated items.
 - **Pacvue proxy** (May 2026): HTTP-streaming proxy to `mcp.pacvue.com/mcp`, 5 tools (report list/schema, materials, run/fetch). Mirrors the TrackIQ proxy pattern but uses raw `pv_<token>` (no `Bearer` prefix) per Pacvue spec.
-- **Alpaca trading** (May 2026): First self-hosted upstream — `alpaca-mcp-server@2.0.1` runs locally on `127.0.0.1:8010` (no built-in auth, hence localhost-only); our Bearer-guarded proxy on 8009 fronts it with synthetic OAuth. 43 tools across orders, positions, watchlists, stock/crypto/options market data. Started in **live** mode (`ALPACA_PAPER_TRADE=false`) — flip to `true` for paper.
+- **Alpaca trading** (May 2026): First self-hosted upstream — `alpaca-mcp-server@2.0.1` runs locally on `127.0.0.1:8010` (no built-in auth, hence localhost-only); our Bearer-guarded proxy on 8009 fronts it with synthetic OAuth. 61 tools (live count) across orders, positions, watchlists, stock/crypto/options market data. Started in **live** mode (`ALPACA_PAPER_TRADE=false`) — flip to `true` for paper.
+- **TA service** (May 2026): Local-compute technical analysis over Alpaca bars. 4 tools — Standard/Camarilla/Woodie pivot points, session VWAP, anchored VWAP, and volume profile (POC/VAH/VAL with uniform per-bar volume distribution). Reuses `ALPACA_API_KEY`/`SECRET_KEY` env vars; first non-proxy gateway service that consumes another gateway service's underlying data source.
 
 ## Open follow-ups
 

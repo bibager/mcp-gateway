@@ -52,6 +52,12 @@
         reverse_proxy localhost:8009
     }
 
+    # --- TA (Technical Analysis) MCP: ta.bibager.com (computes pivots/VWAP/volume profile from Alpaca data) ---
+    @ta header Host ta.bibager.com
+    handle @ta {
+        reverse_proxy localhost:8011
+    }
+
     # --- GA MCP: mcp.bibager.com/ga/* and root OAuth ---
     @ga_path path /ga/*
     handle @ga_path {
@@ -96,6 +102,10 @@
 
     handle_path /alpaca/* {
         reverse_proxy localhost:8009
+    }
+
+    handle_path /ta/* {
+        reverse_proxy localhost:8011
     }
 
     handle {

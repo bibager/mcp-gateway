@@ -25,6 +25,7 @@ COPY services/trackiq/requirements.txt /tmp/trackiq-requirements.txt
 COPY services/framer/requirements.txt /tmp/framer-requirements.txt
 COPY services/pacvue/requirements.txt /tmp/pacvue-requirements.txt
 COPY services/alpaca/requirements.txt /tmp/alpaca-requirements.txt
+COPY services/ta/requirements.txt /tmp/ta-requirements.txt
 
 RUN pip install --no-cache-dir \
     -r /tmp/monarch-requirements.txt \
@@ -35,7 +36,8 @@ RUN pip install --no-cache-dir \
     -r /tmp/trackiq-requirements.txt \
     -r /tmp/framer-requirements.txt \
     -r /tmp/pacvue-requirements.txt \
-    -r /tmp/alpaca-requirements.txt
+    -r /tmp/alpaca-requirements.txt \
+    -r /tmp/ta-requirements.txt
 
 COPY Caddyfile .
 COPY supervisord.conf /etc/supervisor/conf.d/supervisord.conf
