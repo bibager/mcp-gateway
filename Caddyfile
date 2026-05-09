@@ -46,6 +46,12 @@
         reverse_proxy localhost:8008
     }
 
+    # --- Alpaca MCP: alpaca.bibager.com (proxy on 8009 -> upstream alpaca-mcp-server on 8010, localhost-only) ---
+    @alpaca header Host alpaca.bibager.com
+    handle @alpaca {
+        reverse_proxy localhost:8009
+    }
+
     # --- GA MCP: mcp.bibager.com/ga/* and root OAuth ---
     @ga_path path /ga/*
     handle @ga_path {
@@ -86,6 +92,10 @@
 
     handle_path /pacvue/* {
         reverse_proxy localhost:8008
+    }
+
+    handle_path /alpaca/* {
+        reverse_proxy localhost:8009
     }
 
     handle {

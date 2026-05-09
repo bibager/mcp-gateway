@@ -1,0 +1,6 @@
+alpaca-mcp-server==2.0.1
+fastmcp>=2.0
+uvicorn[standard]
+httpx
+starlette
+python-multipart
