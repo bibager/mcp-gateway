@@ -22,8 +22,10 @@ Internet → Caddy (port 8080) → Service routing by host/path
                 ├── pacvue.bibager.com   → Pacvue proxy      (port 8008, Python)
                 ├── alpaca.bibager.com   → Alpaca trading    (port 8009 proxy → 8010 alpaca-mcp-server, Python)
                 │                             Bearer-guarded proxy ─▶ localhost-only FastMCP ─▶ Alpaca API
-                └── ta.bibager.com       → Technical analysis (port 8011, Python)
-                                              Pivots, VWAP, Volume Profile computed locally from Alpaca data
+                ├── ta.bibager.com       → Technical analysis (port 8011, Python)
+                │                             Pivots, VWAP, Volume Profile computed locally from Alpaca data
+                └── uw.bibager.com       → Unusual Whales     (port 8012, Python)
+                                              HTTP-streaming proxy ─▶ api.unusualwhales.com/api/mcp
 ```
 
 ### Key Files
@@ -32,7 +34,7 @@ Internet → Caddy (port 8080) → Service routing by host/path
 ├── Caddyfile              # Reverse proxy routing rules
 ├── Dockerfile             # Python 3.12-slim + Node 22 + Caddy + Supervisor
 ├── docker-compose.yml     # Single service, port 8080, .env file
-├── supervisord.conf       # Process management (13 programs: caddy + 10 services + framer's 2 + alpaca's 2)
+├── supervisord.conf       # Process management (14 programs: caddy + 11 services + framer's 2 + alpaca's 2)
 ├── .env.example           # Environment variable template
 ├── docs/plans/            # Design + implementation plans (Framer build, etc.)
 └── services/
@@ -53,7 +55,8 @@ Internet → Caddy (port 8080) → Service routing by host/path
     │   └── requirements.txt
     ├── pacvue/server.py   # HTTP-streaming proxy to mcp.pacvue.com/mcp
     ├── alpaca/server.py   # Bearer-guarded proxy to localhost alpaca-mcp-server (live trading)
-    └── ta/server.py       # Technical analysis (pivots, VWAP, volume profile) over Alpaca data
+    ├── ta/server.py       # Technical analysis (pivots, VWAP, volume profile) over Alpaca data
+    └── uw/server.py       # HTTP-streaming proxy to api.unusualwhales.com/api/mcp
 ```
 
 ## Services
@@ -147,6 +150,13 @@ Internet → Caddy (port 8080) → Service routing by host/path
 - **OAuth**: Synthetic at our side
 - **Caveat**: Volume Profile uses minute-bar uniform distribution (good approximation; tick-data version possible later via `get_stock_trades`). Pivot computation doesn't account for US market holidays — pass an explicit `session_date` if accuracy around holidays matters.
 
+### Unusual Whales (port 8012)
+- **Purpose**: Options flow, dark pool data, congressional trades, ETF holdings, and broader institutional-flow market analysis from Unusual Whales
+- **Auth**: `UW_API_KEY` env var (UUID format from `unusualwhales.com/settings/api-dashboard`); upstream expects `Authorization: Bearer <uuid>`
+- **Architecture**: Transparent HTTP-streaming proxy to `https://api.unusualwhales.com/api/mcp` (mirrors TrackIQ pattern). The MCP session lives directly between Claude and Unusual Whales — we just rewrite `Authorization`. **NOTE:** the public docs URL `unusualwhales.com/public-api/mcp` is the documentation page, NOT the MCP endpoint — the real endpoint is `api.unusualwhales.com/api/mcp`.
+- **MCP Tools**: forwarded from Unusual Whales (count varies by subscription tier)
+- **OAuth**: Synthetic at our side
+
 ## Routing (Caddyfile)
 
 Host-based routing takes priority (prevents cross-domain OAuth hijack):
@@ -159,9 +169,10 @@ Host-based routing takes priority (prevents cross-domain OAuth hijack):
 7. `pacvue.bibager.com` → 8008
 8. `alpaca.bibager.com` → 8009 (proxy; upstream alpaca-mcp-server on 8010 is localhost-only)
 9. `ta.bibager.com` → 8011 (technical analysis service)
-10. GA OAuth endpoints (`/.well-known/*`, `/authorize`, `/token`, etc.) → 8002
-11. Path-based fallbacks: `/ga/*`, `/monarch/*`, `/todoist/*`, `/gitlab/*`, `/weather/*`, `/trackiq/*`, `/framer/*`, `/pacvue/*`, `/alpaca/*`, `/ta/*`
-12. Default: 404
+10. `uw.bibager.com` → 8012 (Unusual Whales proxy)
+11. GA OAuth endpoints (`/.well-known/*`, `/authorize`, `/token`, etc.) → 8002
+12. Path-based fallbacks: `/ga/*`, `/monarch/*`, `/todoist/*`, `/gitlab/*`, `/weather/*`, `/trackiq/*`, `/framer/*`, `/pacvue/*`, `/alpaca/*`, `/ta/*`, `/uw/*`
+13. Default: 404
 
 ## Environment Variables
 
@@ -189,6 +200,7 @@ Host-based routing takes priority (prevents cross-domain OAuth hijack):
 | `ALPACA_API_KEY` | Alpaca | Alpaca Trading API key ID (live or paper) |
 | `ALPACA_SECRET_KEY` | Alpaca | Alpaca Trading API secret key |
 | `ALPACA_PAPER_TRADE` | Alpaca | `"true"` for paper-trading simulator, `"false"` for live trading |
+| `UW_API_KEY` | Unusual Whales | UUID from `unusualwhales.com/settings/api-dashboard` (Bearer-prefix) |
 | `SERVER_URL` | All | Per-service base URL override (e.g. `https://framer.bibager.com`) |
 
 ## Conventions
@@ -203,7 +215,7 @@ Host-based routing takes priority (prevents cross-domain OAuth hijack):
 ## Deployment
 
 - **Platform**: DigitalOcean App Platform (app id `02a49797-290a-42fa-b71c-2d5dbe4fe107`)
-- **Instance**: `apps-s-1vcpu-1gb` (~$12/mo) — has headroom for all 10 services
+- **Instance**: `apps-s-1vcpu-1gb` (~$12/mo) — has headroom for all 11 services
 - **Git**: Deploys from `origin/main` on push. Local work happens on `master`; push to main with `git push origin master:main`.
 - **CLI**: `doctl` is available and authenticated for spec updates and log inspection.
 - **DNS**: Each subdomain has a Cloudflare CNAME (DNS-only, gray cloud) pointing at `mcp-gateway-pph44.ondigitalocean.app`. Add a new subdomain by (1) registering it as an `ALIAS` domain on the DO app, (2) adding the CNAME in Cloudflare.
@@ -237,6 +249,7 @@ Daily 9:00am CST. Cron → Todoist (P1+P2) → format → Claude Haiku → Gmail
 - **Pacvue proxy** (May 2026): HTTP-streaming proxy to `mcp.pacvue.com/mcp`, 5 tools (report list/schema, materials, run/fetch). Mirrors the TrackIQ proxy pattern but uses raw `pv_<token>` (no `Bearer` prefix) per Pacvue spec.
 - **Alpaca trading** (May 2026): First self-hosted upstream — `alpaca-mcp-server@2.0.1` runs locally on `127.0.0.1:8010` (no built-in auth, hence localhost-only); our Bearer-guarded proxy on 8009 fronts it with synthetic OAuth. 61 tools (live count) across orders, positions, watchlists, stock/crypto/options market data. Started in **live** mode (`ALPACA_PAPER_TRADE=false`) — flip to `true` for paper.
 - **TA service** (May 2026): Local-compute technical analysis over Alpaca bars. 4 tools — Standard/Camarilla/Woodie pivot points, session VWAP, anchored VWAP, and volume profile (POC/VAH/VAL with uniform per-bar volume distribution). Reuses `ALPACA_API_KEY`/`SECRET_KEY` env vars; first non-proxy gateway service that consumes another gateway service's underlying data source.
+- **Unusual Whales proxy** (May 2026): HTTP-streaming proxy to `api.unusualwhales.com/api/mcp` with Bearer rewrite. Surfaces options flow, dark pool, congressional trades, ETF holdings. Critical setup gotcha: the public-facing `unusualwhales.com/public-api/mcp` URL is the docs page, NOT the MCP endpoint — use `api.unusualwhales.com/api/mcp` upstream.
 
 ## Open follow-ups
 

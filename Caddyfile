@@ -58,6 +58,12 @@
         reverse_proxy localhost:8011
     }
 
+    # --- Unusual Whales MCP: uw.bibager.com (proxy to api.unusualwhales.com/api/mcp) ---
+    @uw header Host uw.bibager.com
+    handle @uw {
+        reverse_proxy localhost:8012
+    }
+
     # --- GA MCP: mcp.bibager.com/ga/* and root OAuth ---
     @ga_path path /ga/*
     handle @ga_path {
@@ -106,6 +112,10 @@
 
     handle_path /ta/* {
         reverse_proxy localhost:8011
+    }
+
+    handle_path /uw/* {
+        reverse_proxy localhost:8012
     }
 
     handle {
