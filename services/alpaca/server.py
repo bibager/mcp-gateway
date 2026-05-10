@@ -72,7 +72,7 @@ _REQ_STRIP = _HOP_BY_HOP | {
     "via", "cdn-loop", "do-connecting-ip", "x-cloud-trace-context",
 }
 # Headers we strip from the upstream response before relaying to CoWork.
-_RESP_STRIP = _HOP_BY_HOP | {"content-encoding", "content-length"}
+_RESP_STRIP = _HOP_BY_HOP | {"content-length"}
 
 
 # --- /mcp passthrough --------------------------------------------------------

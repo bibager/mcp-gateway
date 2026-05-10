@@ -62,7 +62,7 @@ _REQ_STRIP = _HOP_BY_HOP | {
     "x-forwarded-for", "x-forwarded-proto", "x-forwarded-host",
     "via", "cdn-loop", "do-connecting-ip", "x-cloud-trace-context",
 }
-_RESP_STRIP = _HOP_BY_HOP | {"content-encoding", "content-length"}
+_RESP_STRIP = _HOP_BY_HOP | {"content-length"}
 
 
 # --- /mcp passthrough --------------------------------------------------------
