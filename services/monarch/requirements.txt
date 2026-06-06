@@ -1,5 +1,5 @@
 fastmcp>=2.0
-monarchmoney>=0.1.15
+monarchmoney @ git+https://github.com/hammem/monarchmoney.git@main
 gql[aiohttp]>=3.0,<4.0
 uvicorn[standard]>=0.29
 starlette>=0.37
