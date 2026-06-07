@@ -110,6 +110,16 @@ async def _init_monarch() -> None:
         mm._headers["Cookie"] = cookie_header
         if MONARCH_CSRF_TOKEN:
             mm._headers["X-CSRFToken"] = MONARCH_CSRF_TOKEN
+        # Django's CSRF middleware also enforces Origin/Referer on POSTs —
+        # without these we get 403 even when the session_id is valid.
+        # Spoof a real-browser User-Agent too; Monarch's WAF samples the
+        # default aiohttp UA and may block it.
+        mm._headers["Origin"] = "https://app.monarch.com"
+        mm._headers["Referer"] = "https://app.monarch.com/"
+        mm._headers["User-Agent"] = (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36"
+        )
         # Library still wants a _token value for internal bookkeeping; the
         # value is opaque to it now (not used in request headers), so set the
         # session_id as a placeholder.
