@@ -456,6 +456,137 @@ async def set_budget_amount(
     return _json(data)
 
 
+@mcp.tool(
+    name="get_account_history",
+    annotations={"readOnlyHint": True, "destructiveHint": False},
+)
+async def get_account_history(account_id: str) -> str:
+    """
+    Return daily balance snapshots for a single account, going back to the
+    account's creation date. Returns a list of `{date, signedBalance}` rows.
+
+    Use this for "what was the balance of account X on date Y" questions.
+    Combine with get_accounts to look up account IDs.
+
+    Args:
+        account_id: Monarch account ID (string of digits, NOT the masked 4-digit
+                    account number). Get from get_accounts.
+    """
+    await _init_monarch()
+    data = await mm.get_account_history(int(account_id))
+    return _json(data)
+
+
+@mcp.tool(
+    name="get_account_snapshots_by_type",
+    annotations={"readOnlyHint": True, "destructiveHint": False},
+)
+async def get_account_snapshots_by_type(start_date: str, timeframe: str = "month") -> str:
+    """
+    Return aggregated balance history grouped by account TYPE (Cash, Investments,
+    Credit, etc.) from start_date to today.
+
+    Args:
+        start_date: First date to include (YYYY-MM-DD).
+        timeframe: Aggregation bucket — "day", "week", "month", "quarter", or "year".
+                   Default "month".
+    """
+    await _init_monarch()
+    data = await mm.get_account_snapshots_by_type(start_date=start_date, timeframe=timeframe)
+    return _json(data)
+
+
+@mcp.tool(
+    name="get_recent_account_balances",
+    annotations={"readOnlyHint": True, "destructiveHint": False},
+)
+async def get_recent_account_balances(start_date: Optional[str] = None) -> str:
+    """
+    Return recent daily balance snapshots for every account (in one call).
+    Use this when you want to compare balances across multiple accounts on the
+    same dates — much cheaper than calling get_account_history per account.
+
+    Args:
+        start_date: First date to include (YYYY-MM-DD). Defaults to 30 days ago.
+    """
+    await _init_monarch()
+    kwargs: dict[str, Any] = {}
+    if start_date:
+        kwargs["start_date"] = start_date
+    data = await mm.get_recent_account_balances(**kwargs)
+    return _json(data)
+
+
+@mcp.tool(
+    name="get_institutions",
+    annotations={"readOnlyHint": True, "destructiveHint": False},
+)
+async def get_institutions() -> str:
+    """
+    List all connected financial institutions and their sync status.
+    Useful for diagnosing stale balances ("when did Bank of America last sync?")
+    or seeing which banks have connection issues.
+    """
+    await _init_monarch()
+    data = await mm.get_institutions()
+    return _json(data)
+
+
+@mcp.tool(
+    name="get_transaction_details",
+    annotations={"readOnlyHint": True, "destructiveHint": False},
+)
+async def get_transaction_details(transaction_id: str) -> str:
+    """
+    Return full detail for a single transaction including splits, attachments,
+    notes, tags, and full merchant data. Use after get_transactions to drill
+    into a specific row.
+
+    Args:
+        transaction_id: The transaction's Monarch ID (from get_transactions).
+    """
+    await _init_monarch()
+    data = await mm.get_transaction_details(transaction_id=transaction_id)
+    return _json(data)
+
+
+@mcp.tool(
+    name="get_transactions_summary",
+    annotations={"readOnlyHint": True, "destructiveHint": False},
+)
+async def get_transactions_summary() -> str:
+    """
+    Return aggregate counts and sums of transactions (totalCount,
+    sumIncome, sumExpense, etc.) for the current default period.
+    Cheaper than fetching full transaction lists when you just need totals.
+    """
+    await _init_monarch()
+    data = await mm.get_transactions_summary()
+    return _json(data)
+
+
+@mcp.tool(
+    name="request_accounts_refresh",
+    annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True},
+)
+async def request_accounts_refresh(wait: bool = True) -> str:
+    """
+    Trigger Monarch to pull fresh balances + transactions from all connected
+    banks. Useful when data looks stale and you want the most current numbers.
+
+    Args:
+        wait: If True (default), block until the refresh completes (may take
+              60-120s for many accounts). If False, return immediately after
+              kicking off the refresh — balances update asynchronously.
+    """
+    await _init_monarch()
+    if wait:
+        data = await mm.request_accounts_refresh_and_wait()
+    else:
+        data = await mm.request_accounts_refresh()
+    return _json(data)
+
+
 # --- Auth Middleware ----------------------------------------------------------
 
 

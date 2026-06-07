@@ -420,6 +420,211 @@ async def add_comment(
         return _json(r.json())
 
 
+@mcp.tool(name="get_filters", annotations={"readOnlyHint": True, "destructiveHint": False})
+async def get_filters() -> str:
+    """List your saved filters (named search queries) in Todoist."""
+    async with httpx.AsyncClient() as client:
+        r = await client.get(f"{TODOIST_BASE}/filters", headers=_auth_headers())
+        r.raise_for_status()
+        return _json(r.json())
+
+
+@mcp.tool(name="get_project", annotations={"readOnlyHint": True, "destructiveHint": False})
+async def get_project(project_id: str) -> str:
+    """
+    Return a single project by ID.
+
+    Args:
+        project_id: The project's Todoist ID.
+    """
+    async with httpx.AsyncClient() as client:
+        r = await client.get(f"{TODOIST_BASE}/projects/{project_id}", headers=_auth_headers())
+        r.raise_for_status()
+        return _json(r.json())
+
+
+@mcp.tool(name="create_project", annotations={"readOnlyHint": False, "destructiveHint": False})
+async def create_project(
+    name: str,
+    parent_id: Optional[str] = None,
+    color: Optional[str] = None,
+    is_favorite: Optional[bool] = None,
+    view_style: Optional[str] = None,
+) -> str:
+    """
+    Create a new Todoist project.
+
+    Args:
+        name: Project name.
+        parent_id: Parent project ID for sub-projects.
+        color: Color name (e.g. "berry_red", "blue", "lime_green").
+        is_favorite: Pin to favorites.
+        view_style: "list" or "board".
+    """
+    body: dict[str, Any] = {"name": name}
+    for k, v in {
+        "parent_id": parent_id,
+        "color": color,
+        "is_favorite": is_favorite,
+        "view_style": view_style,
+    }.items():
+        if v is not None:
+            body[k] = v
+    async with httpx.AsyncClient() as client:
+        r = await client.post(f"{TODOIST_BASE}/projects", headers=_auth_headers(), json=body)
+        r.raise_for_status()
+        return _json(r.json())
+
+
+@mcp.tool(name="update_project", annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True})
+async def update_project(
+    project_id: str,
+    name: Optional[str] = None,
+    color: Optional[str] = None,
+    is_favorite: Optional[bool] = None,
+    view_style: Optional[str] = None,
+) -> str:
+    """
+    Update a Todoist project (rename, recolor, favorite, change view).
+
+    Args:
+        project_id: ID of the project to update.
+        name: New name.
+        color: New color.
+        is_favorite: Pin/unpin from favorites.
+        view_style: "list" or "board".
+    """
+    body: dict[str, Any] = {}
+    for k, v in {
+        "name": name, "color": color, "is_favorite": is_favorite, "view_style": view_style,
+    }.items():
+        if v is not None:
+            body[k] = v
+    if not body:
+        return _json({"error": "no fields provided"})
+    async with httpx.AsyncClient() as client:
+        r = await client.post(f"{TODOIST_BASE}/projects/{project_id}", headers=_auth_headers(), json=body)
+        r.raise_for_status()
+        return _json(r.json())
+
+
+@mcp.tool(name="delete_project", annotations={"readOnlyHint": False, "destructiveHint": True})
+async def delete_project(project_id: str) -> str:
+    """
+    Delete a Todoist project (and all tasks/sections inside it). DESTRUCTIVE.
+
+    Args:
+        project_id: The project's Todoist ID.
+    """
+    async with httpx.AsyncClient() as client:
+        r = await client.delete(f"{TODOIST_BASE}/projects/{project_id}", headers=_auth_headers())
+        r.raise_for_status()
+        return _json({"deleted": project_id, "status": r.status_code})
+
+
+@mcp.tool(name="create_label", annotations={"readOnlyHint": False, "destructiveHint": False})
+async def create_label(
+    name: str,
+    color: Optional[str] = None,
+    is_favorite: Optional[bool] = None,
+    order: Optional[int] = None,
+) -> str:
+    """
+    Create a new personal label.
+
+    Args:
+        name: Label name.
+        color: Color name (e.g. "red", "blue").
+        is_favorite: Pin to favorites.
+        order: Display order.
+    """
+    body: dict[str, Any] = {"name": name}
+    for k, v in {"color": color, "is_favorite": is_favorite, "order": order}.items():
+        if v is not None:
+            body[k] = v
+    async with httpx.AsyncClient() as client:
+        r = await client.post(f"{TODOIST_BASE}/labels", headers=_auth_headers(), json=body)
+        r.raise_for_status()
+        return _json(r.json())
+
+
+@mcp.tool(name="update_label", annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True})
+async def update_label(
+    label_id: str,
+    name: Optional[str] = None,
+    color: Optional[str] = None,
+    is_favorite: Optional[bool] = None,
+    order: Optional[int] = None,
+) -> str:
+    """
+    Rename, recolor, or reorder a label.
+
+    Args:
+        label_id: ID of the label to update.
+        name: New name.
+        color: New color.
+        is_favorite: Favorite flag.
+        order: New display order.
+    """
+    body: dict[str, Any] = {}
+    for k, v in {"name": name, "color": color, "is_favorite": is_favorite, "order": order}.items():
+        if v is not None:
+            body[k] = v
+    if not body:
+        return _json({"error": "no fields provided"})
+    async with httpx.AsyncClient() as client:
+        r = await client.post(f"{TODOIST_BASE}/labels/{label_id}", headers=_auth_headers(), json=body)
+        r.raise_for_status()
+        return _json(r.json())
+
+
+@mcp.tool(name="delete_label", annotations={"readOnlyHint": False, "destructiveHint": True})
+async def delete_label(label_id: str) -> str:
+    """
+    Delete a personal label. DESTRUCTIVE — removes the label from all tasks.
+
+    Args:
+        label_id: The label's Todoist ID.
+    """
+    async with httpx.AsyncClient() as client:
+        r = await client.delete(f"{TODOIST_BASE}/labels/{label_id}", headers=_auth_headers())
+        r.raise_for_status()
+        return _json({"deleted": label_id, "status": r.status_code})
+
+
+@mcp.tool(name="update_comment", annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True})
+async def update_comment(comment_id: str, content: str) -> str:
+    """
+    Edit the text of an existing comment.
+
+    Args:
+        comment_id: ID of the comment.
+        content: New comment text (markdown supported).
+    """
+    async with httpx.AsyncClient() as client:
+        r = await client.post(
+            f"{TODOIST_BASE}/comments/{comment_id}",
+            headers=_auth_headers(),
+            json={"content": content},
+        )
+        r.raise_for_status()
+        return _json(r.json())
+
+
+@mcp.tool(name="delete_comment", annotations={"readOnlyHint": False, "destructiveHint": True})
+async def delete_comment(comment_id: str) -> str:
+    """
+    Delete a comment. DESTRUCTIVE.
+
+    Args:
+        comment_id: The comment's Todoist ID.
+    """
+    async with httpx.AsyncClient() as client:
+        r = await client.delete(f"{TODOIST_BASE}/comments/{comment_id}", headers=_auth_headers())
+        r.raise_for_status()
+        return _json({"deleted": comment_id, "status": r.status_code})
+
+
 # --- Todoist OAuth Routes ----------------------------------------------------
 
 

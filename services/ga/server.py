@@ -23,6 +23,14 @@ from analytics_mcp.tools.reporting.realtime import (
 from analytics_mcp.tools.reporting.metadata import (
     get_custom_dimensions_and_metrics,
 )
+from analytics_mcp.tools.reporting.conversions import (
+    run_conversions_report,
+    _run_conversions_report_description,
+)
+from analytics_mcp.tools.reporting.funnel import (
+    run_funnel_report,
+    _run_funnel_report_description,
+)
 from search_console import (
     list_search_console_sites,
     query_search_analytics,
@@ -65,6 +73,8 @@ mcp.tool()(list_property_annotations)
 mcp.tool()(get_custom_dimensions_and_metrics)
 mcp.tool(description=_run_report_description())(run_report)
 mcp.tool(description=_run_realtime_report_description())(run_realtime_report)
+mcp.tool(description=_run_conversions_report_description())(run_conversions_report)
+mcp.tool(description=_run_funnel_report_description())(run_funnel_report)
 mcp.tool()(list_search_console_sites)
 mcp.tool()(query_search_analytics)
 mcp.tool()(inspect_url)
