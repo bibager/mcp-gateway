@@ -55,6 +55,7 @@ MONARCH_PASSWORD: str | None = os.getenv("MONARCH_PASSWORD")
 # Get it from: Monarch Settings -> Security -> MFA -> "Two-factor text code"
 # Or from 1Password: Edit the Monarch entry -> OTP field -> Copy Secret Key
 MONARCH_MFA_SECRET: str | None = os.getenv("MONARCH_MFA_SECRET")
+MONARCH_CSRF_TOKEN: str | None = os.getenv("MONARCH_CSRF_TOKEN")  # for mutations
 PORT: int = int(os.getenv("PORT", "8000"))
 
 # --- OAuth 2.0 with PKCE (for Claude web connector) --------------------------
@@ -92,10 +93,34 @@ async def _init_monarch() -> None:
         return
 
     if MONARCH_TOKEN:
-        mm.set_token(MONARCH_TOKEN)
-        mm._headers["Authorization"] = f"Token {MONARCH_TOKEN}"
+        # Monarch migrated to session-cookie auth in 2026. The Authorization
+        # header path the library was built around no longer works — the API
+        # now reads a `session_id` cookie on api.monarch.com instead.
+        # MONARCH_TOKEN holds the session_id value (captured from a real
+        # browser session via the Monarch Token Extractor extension).
+        # Optional MONARCH_CSRF_TOKEN is required for mutations.
+        cookie_parts = [f"session_id={MONARCH_TOKEN}"]
+        if MONARCH_CSRF_TOKEN:
+            cookie_parts.append(f"csrftoken={MONARCH_CSRF_TOKEN}")
+        cookie_header = "; ".join(cookie_parts)
+
+        # Wipe any Authorization the lib may have inherited from a previous
+        # init, and inject the Cookie + CSRF headers the new API expects.
+        mm._headers.pop("Authorization", None)
+        mm._headers["Cookie"] = cookie_header
+        if MONARCH_CSRF_TOKEN:
+            mm._headers["X-CSRFToken"] = MONARCH_CSRF_TOKEN
+        # Library still wants a _token value for internal bookkeeping; the
+        # value is opaque to it now (not used in request headers), so set the
+        # session_id as a placeholder.
+        mm._token = MONARCH_TOKEN
+
         _monarch_ready = True
-        logger.info("Monarch: using token from MONARCH_TOKEN env var (stateless)")
+        logger.info(
+            "Monarch: using session_id cookie from MONARCH_TOKEN (%s, CSRF %s)",
+            "set" if MONARCH_TOKEN else "missing",
+            "set" if MONARCH_CSRF_TOKEN else "not set (mutations may fail)",
+        )
         return
 
     if not (MONARCH_EMAIL and MONARCH_PASSWORD):
