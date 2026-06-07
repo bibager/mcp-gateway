@@ -1,0 +1,24 @@
+{
+  "manifest_version": 3,
+  "name": "Monarch Token Extractor",
+  "version": "1.0.0",
+  "description": "Captures your active Monarch Money session token in one click. Reads from localStorage, cookies, and the most recent GraphQL request — copies to clipboard for paste-into-Claude.",
+  "permissions": [
+    "cookies",
+    "scripting",
+    "activeTab",
+    "webRequest",
+    "storage"
+  ],
+  "host_permissions": [
+    "https://*.monarch.com/*",
+    "https://*.monarchmoney.com/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Capture Monarch token"
+  }
+}
