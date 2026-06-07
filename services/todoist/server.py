@@ -422,11 +422,23 @@ async def add_comment(
 
 @mcp.tool(name="get_filters", annotations={"readOnlyHint": True, "destructiveHint": False})
 async def get_filters() -> str:
-    """List your saved filters (named search queries) in Todoist."""
+    """
+    List your saved filters (named search queries) in Todoist.
+
+    NOTE: filters aren't exposed in Todoist's unified v1 REST API — only via
+    the legacy Sync API. This tool POSTs a single-resource sync request to
+    get just the filters.
+    """
     async with httpx.AsyncClient() as client:
-        r = await client.get(f"{TODOIST_BASE}/filters", headers=_auth_headers())
+        r = await client.post(
+            "https://api.todoist.com/sync/v9/sync",
+            headers=_auth_headers(),
+            data={"sync_token": "*", "resource_types": '["filters"]'},
+        )
         r.raise_for_status()
-        return _json(r.json())
+        body = r.json()
+        # Sync response wraps everything in a state object — we only want filters
+        return _json({"filters": body.get("filters", [])})
 
 
 @mcp.tool(name="get_project", annotations={"readOnlyHint": True, "destructiveHint": False})
