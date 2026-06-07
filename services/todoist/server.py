@@ -425,19 +425,18 @@ async def get_filters() -> str:
     """
     List your saved filters (named search queries) in Todoist.
 
-    NOTE: filters aren't exposed in Todoist's unified v1 REST API — only via
-    the legacy Sync API. This tool POSTs a single-resource sync request to
-    get just the filters.
+    NOTE: filters aren't exposed in Todoist's REST resource endpoints —
+    only via the sync endpoint. The legacy /sync/v9/sync returns 410 Gone;
+    Todoist consolidated it under /api/v1/sync.
     """
     async with httpx.AsyncClient() as client:
         r = await client.post(
-            "https://api.todoist.com/sync/v9/sync",
+            f"{TODOIST_BASE}/sync",
             headers=_auth_headers(),
             data={"sync_token": "*", "resource_types": '["filters"]'},
         )
         r.raise_for_status()
         body = r.json()
-        # Sync response wraps everything in a state object — we only want filters
         return _json({"filters": body.get("filters", [])})
 
 
