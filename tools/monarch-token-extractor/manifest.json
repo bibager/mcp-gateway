@@ -1,18 +1,40 @@
 {
   "manifest_version": 3,
   "name": "Monarch Token Extractor",
-  "version": "1.0.0",
-  "description": "Captures your active Monarch Money session token in one click. Reads from localStorage, cookies, and the most recent GraphQL request — copies to clipboard for paste-into-Claude.",
+  "version": "2.0.0",
+  "description": "Captures your Monarch session auth header end-to-end. Monkey-patches the page's own fetch/XHR so every API request's Authorization header is recorded, regardless of when the popup opens.",
   "permissions": [
     "cookies",
     "scripting",
     "activeTab",
     "webRequest",
-    "storage"
+    "storage",
+    "tabs"
   ],
   "host_permissions": [
     "https://*.monarch.com/*",
     "https://*.monarchmoney.com/*"
+  ],
+  "content_scripts": [
+    {
+      "matches": [
+        "https://*.monarch.com/*",
+        "https://*.monarchmoney.com/*"
+      ],
+      "js": ["content_main.js"],
+      "run_at": "document_start",
+      "world": "MAIN",
+      "all_frames": false
+    },
+    {
+      "matches": [
+        "https://*.monarch.com/*",
+        "https://*.monarchmoney.com/*"
+      ],
+      "js": ["content_bridge.js"],
+      "run_at": "document_start",
+      "all_frames": false
+    }
   ],
   "background": {
     "service_worker": "background.js"

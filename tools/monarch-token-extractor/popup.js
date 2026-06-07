@@ -1,170 +1,205 @@
-// Popup logic: scan localStorage + cookies + intercepted Authorization header
-// for the active Monarch session token. Surface the most likely candidate and
-// let the user copy it.
+// Popup logic: read everything we've captured, render it, expose
+// copy-the-token AND copy-the-diagnostic-JSON buttons.
 
 const el = (id) => document.getElementById(id);
 
-async function findToken() {
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+
+function stripPrefix(header) {
+  // Strip the Bearer / Token prefix so we get the raw value
+  const m = header && header.match(/^(Bearer|Token)\s+(.+)$/i);
+  return m ? { prefix: m[1], value: m[2] } : { prefix: null, value: header };
+}
+
+async function getCaptures() {
+  try {
+    return new Promise((resolve) => {
+      chrome.runtime.sendMessage({ type: "get-captures" }, (res) => resolve(res || []));
+    });
+  } catch (e) {
+    return [];
+  }
+}
+
+async function getPageData(tabId) {
+  if (!tabId) return null;
+  try {
+    const [r] = await chrome.scripting.executeScript({
+      target: { tabId },
+      func: () => {
+        const ls = {};
+        for (let i = 0; i < localStorage.length; i++) {
+          const k = localStorage.key(i);
+          ls[k] = localStorage.getItem(k);
+        }
+        const ss = {};
+        for (let i = 0; i < sessionStorage.length; i++) {
+          const k = sessionStorage.key(i);
+          ss[k] = sessionStorage.getItem(k);
+        }
+        return {
+          url: location.href,
+          userAgent: navigator.userAgent,
+          documentCookie: document.cookie,
+          localStorage: ls,
+          sessionStorage: ss,
+        };
+      },
+    });
+    return r.result || null;
+  } catch (e) {
+    return { error: e.message };
+  }
+}
+
+async function getCookies() {
+  try {
+    const monarchCom = await chrome.cookies.getAll({ domain: "monarch.com" });
+    const monarchMoney = await chrome.cookies.getAll({ domain: "monarchmoney.com" });
+    return [...monarchCom, ...monarchMoney].map((c) => ({
+      domain: c.domain,
+      name: c.name,
+      value: c.value,
+      httpOnly: c.httpOnly,
+      secure: c.secure,
+      sameSite: c.sameSite,
+      expirationDate: c.expirationDate,
+    }));
+  } catch (e) {
+    return [{ error: e.message }];
+  }
+}
+
+async function refresh() {
   el("status").textContent = "";
   el("status").className = "status";
-  el("result").innerHTML = '<div class="sub">Reading active tab…</div>';
-  el("copy").disabled = true;
+  el("result").innerHTML = '<div class="sub">Reading captures…</div>';
 
-  let foundToken = null;
-  let foundLocation = null;
-  let debugInfo = "";
-
-  // 1. Get current tab and verify it's a Monarch tab
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-  if (!tab || !tab.url || !/monarch(money)?\.com/.test(tab.url)) {
+  const tabId = tab && tab.id;
+  const tabUrl = (tab && tab.url) || "";
+  const isMonarchTab = /monarch(money)?\.com/.test(tabUrl);
+
+  // Pull all data in parallel
+  const [captures, pageData, cookies] = await Promise.all([
+    getCaptures(),
+    isMonarchTab ? getPageData(tabId) : Promise.resolve(null),
+    getCookies(),
+  ]);
+
+  // Find the most recent capture that has a real auth header
+  const auths = captures.filter((c) => c.authHeader && c.authHeader.length >= 20);
+  const latest = auths[auths.length - 1] || null;
+
+  // Build the rendered top-line result
+  if (latest) {
+    const { prefix, value } = stripPrefix(latest.authHeader);
+    const ageSec = latest.lastSeenAt ? Math.round((Date.now() - latest.lastSeenAt) / 1000) : null;
     el("result").innerHTML = `
-      <div class="result-box err">
-        <strong>Open <a href="https://app.monarch.com" target="_blank">app.monarch.com</a> in this tab first.</strong>
-        <div class="status">Then log in and click Re-scan.</div>
-      </div>`;
-    return;
-  }
-
-  // 2. PRIMARY SOURCE: intercepted Authorization header from a real API call.
-  // This is the ground truth — whatever auth Monarch's backend actually accepts.
-  try {
-    const captured = await chrome.runtime.sendMessage({ type: "get-captured-auth-header" });
-    if (captured && captured.authHeader) {
-      // Strip "Bearer "/"Token " prefix so the user always gets the raw token value
-      const raw = captured.authHeader.replace(/^(Bearer|Token)\s+/i, "");
-      foundToken = raw;
-      const ageSec = captured.capturedAt ? Math.round((Date.now() - captured.capturedAt) / 1000) : null;
-      const prefixMatch = captured.authHeader.match(/^(Bearer|Token)\s+/i);
-      const prefix = prefixMatch ? prefixMatch[1] : "raw";
-      foundLocation = `intercepted Authorization header — format: "${prefix} &lt;token&gt;"${ageSec !== null ? `, captured ${ageSec}s ago` : ""}`;
-    }
-  } catch (e) {
-    debugInfo += `(header intercept lookup failed: ${e.message})\n`;
-  }
-
-  // 3. FALLBACK: read localStorage / sessionStorage / cookies. Only reach
-  // here if the user hasn't triggered an API request yet this session.
-  let pageData = { localStorage: {}, sessionStorage: {}, cookies: "" };
-  if (!foundToken) {
-    try {
-      const [scriptResult] = await chrome.scripting.executeScript({
-        target: { tabId: tab.id },
-        func: () => {
-          const storage = {};
-          for (let i = 0; i < localStorage.length; i++) {
-            const k = localStorage.key(i);
-            storage[k] = localStorage.getItem(k);
-          }
-          const sessionStore = {};
-          for (let i = 0; i < sessionStorage.length; i++) {
-            const k = sessionStorage.key(i);
-            sessionStore[k] = sessionStorage.getItem(k);
-          }
-          return { localStorage: storage, sessionStorage: sessionStore, cookies: document.cookie };
-        },
-      });
-      pageData = scriptResult.result || pageData;
-    } catch (e) {
-      debugInfo += `(localStorage read failed: ${e.message})\n`;
-    }
-
-    const lookForTokenIn = (obj, depth = 0) => {
-      if (depth > 6) return null;
-      if (typeof obj === "string") {
-        if (/^[A-Za-z0-9_.-]{30,}$/.test(obj)) return obj;
-        return null;
-      }
-      if (!obj || typeof obj !== "object") return null;
-      for (const key of ["token", "authToken", "access_token", "accessToken", "auth", "Authorization", "bearerToken"]) {
-        if (obj[key] && typeof obj[key] === "string" && obj[key].length > 20) {
-          return obj[key];
-        }
-      }
-      for (const v of Object.values(obj)) {
-        const found = lookForTokenIn(v, depth + 1);
-        if (found) return found;
-      }
-      return null;
-    };
-
-    for (const [key, value] of Object.entries(pageData.localStorage || {})) {
-      let parsed;
-      try { parsed = JSON.parse(value); } catch { parsed = value; }
-      const t = lookForTokenIn(parsed);
-      if (t) {
-        foundToken = t;
-        foundLocation = `localStorage["${key}"] (fallback — may be a session ID rather than auth token)`;
-        break;
-      }
-    }
-    if (!foundToken) {
-      for (const [key, value] of Object.entries(pageData.sessionStorage || {})) {
-        let parsed;
-        try { parsed = JSON.parse(value); } catch { parsed = value; }
-        const t = lookForTokenIn(parsed);
-        if (t) {
-          foundToken = t;
-          foundLocation = `sessionStorage["${key}"] (fallback — may be a session ID rather than auth token)`;
-          break;
-        }
-      }
-    }
-    if (!foundToken) {
-      try {
-        const cookies = await chrome.cookies.getAll({ domain: "monarch.com" });
-        const authCookies = cookies.filter(
-          (c) => /token|auth|session/i.test(c.name) && c.value.length > 20
-        );
-        authCookies.sort((a, b) => b.value.length - a.value.length);
-        if (authCookies.length > 0) {
-          foundToken = authCookies[0].value;
-          foundLocation = `cookie: ${authCookies[0].name} (fallback — may be a session ID rather than auth token)`;
-        }
-      } catch (e) {
-        debugInfo += `(cookie read failed: ${e.message})\n`;
-      }
-    }
-  }
-
-  // 4. Render
-  if (!foundToken) {
-    el("result").innerHTML = `
-      <div class="result-box err">
-        <strong>No auth token found in this tab.</strong>
-        <div class="status">
-          To capture the real token: (1) keep this Monarch tab focused,
-          (2) click around in Monarch's UI so the app makes an API request,
-          then (3) hit Re-scan.
+      <div class="result-box found">
+        <div class="ok"><strong>✓ Captured ${auths.length} Authorization header(s)</strong></div>
+        <div class="label" style="margin-top:6px">
+          Latest source: <strong>${latest.via}</strong> ${prefix ? `· prefix: <strong>${prefix}</strong>` : "· no prefix"}
+          ${ageSec !== null ? ` · seen ${ageSec}s ago` : ""}
+          ${latest.count && latest.count > 1 ? ` · ×${latest.count}` : ""}
         </div>
-        <div class="status">${debugInfo}</div>
+        <div class="label">Full header (with prefix):</div>
+        <div class="token-value">${escapeHtml(latest.authHeader)}</div>
+        <div class="label" style="margin-top:6px">Raw token (prefix stripped, ${value.length} chars):</div>
+        <div class="token-value">${escapeHtml(value)}</div>
       </div>`;
-    return;
+    el("copy-token").disabled = false;
+    el("copy-token").onclick = async () => {
+      await navigator.clipboard.writeText(value);
+      el("status").textContent = `✓ Copied ${value.length}-char raw token`;
+      el("status").className = "status ok";
+    };
+  } else {
+    const tabHint = isMonarchTab
+      ? "Click anything in the Monarch UI to trigger an API call, then hit Re-scan."
+      : "Open https://app.monarch.com in this tab first.";
+    el("result").innerHTML = `
+      <div class="result-box miss">
+        <div class="err"><strong>No Authorization header captured yet.</strong></div>
+        <div class="status">${tabHint}</div>
+      </div>`;
+    el("copy-token").disabled = true;
   }
 
-  el("result").innerHTML = `
-    <div class="result-box">
-      <div class="ok"><strong>✓ Captured token</strong></div>
-      <div class="label">Source: ${foundLocation}</div>
-      <div class="label">Length: ${foundToken.length} chars</div>
-      <div class="token-value">${escapeHtml(foundToken)}</div>
-    </div>`;
+  // Render history
+  if (auths.length > 0) {
+    el("history-section").style.display = "block";
+    el("history-count").textContent = String(auths.length);
+    el("history").innerHTML = auths
+      .slice()
+      .reverse()
+      .map((c) => {
+        const { prefix, value } = stripPrefix(c.authHeader);
+        const age = c.lastSeenAt ? Math.round((Date.now() - c.lastSeenAt) / 1000) + "s ago" : "";
+        return `
+          <div class="result-box" style="margin-top:6px">
+            <div class="label">
+              <span class="pill ${escapeHtml((c.via || "").split(",")[0])}">${escapeHtml(c.via || "?")}</span>
+              · ${age} ${c.count && c.count > 1 ? `· ×${c.count}` : ""}
+              ${prefix ? `· <strong>${prefix}</strong>` : ""}
+            </div>
+            <div class="label">URL: <code>${escapeHtml((c.url || "").slice(0, 80))}</code></div>
+            <div class="small-pre">${escapeHtml(value)}</div>
+          </div>`;
+      })
+      .join("");
+  } else {
+    el("history-section").style.display = "none";
+  }
 
-  el("copy").disabled = false;
-  el("copy").onclick = async () => {
-    try {
-      await navigator.clipboard.writeText(foundToken);
-      el("status").textContent = `✓ Copied ${foundToken.length} chars to clipboard. Paste into Claude.`;
-      el("status").className = "status ok";
-    } catch (e) {
-      el("status").textContent = `Copy failed: ${e.message}`;
-      el("status").className = "status err";
-    }
+  // Render page-data preview
+  if (pageData && !pageData.error) {
+    el("page-section").style.display = "block";
+    const ls = Object.entries(pageData.localStorage || {})
+      .map(([k, v]) => `  ${k} (${v.length} chars)`)
+      .join("\n");
+    const ss = Object.entries(pageData.sessionStorage || {})
+      .map(([k, v]) => `  ${k} (${v.length} chars)`)
+      .join("\n");
+    el("page-data").innerHTML = `
+      <div class="small-pre">URL: ${escapeHtml(pageData.url)}\nUA: ${escapeHtml(pageData.userAgent)}\n\nlocalStorage (${Object.keys(pageData.localStorage).length} keys):\n${escapeHtml(ls)}\n\nsessionStorage (${Object.keys(pageData.sessionStorage).length} keys):\n${escapeHtml(ss)}\n\ndocument.cookie:\n  ${escapeHtml(pageData.documentCookie)}\n\nChrome cookies API (${cookies.length} entries):\n${cookies.map(c=>`  ${c.name}@${c.domain}${c.httpOnly?" [HttpOnly]":""} (${(c.value||"").length} chars)`).join("\n")}</div>
+    `;
+  } else {
+    el("page-section").style.display = "none";
+  }
+
+  // Wire up "Copy full diagnostic JSON"
+  el("copy-diag").onclick = async () => {
+    const blob = {
+      version: "2.0.0",
+      capturedAt: new Date().toISOString(),
+      tab: { url: tabUrl, isMonarchTab },
+      authHeaders: auths.map((c) => ({
+        via: c.via,
+        url: c.url,
+        authHeader: c.authHeader,
+        ...stripPrefix(c.authHeader),
+        capturedAt: c.capturedAt,
+        lastSeenAt: c.lastSeenAt,
+        count: c.count,
+      })),
+      page: pageData,
+      cookies,
+    };
+    const json = JSON.stringify(blob, null, 2);
+    await navigator.clipboard.writeText(json);
+    el("status").textContent = `✓ Copied ${json.length}-char diagnostic JSON`;
+    el("status").className = "status ok";
+  };
+
+  // Wire up "Clear history"
+  el("clear").onclick = async () => {
+    await new Promise((res) => chrome.runtime.sendMessage({ type: "clear-captures" }, res));
+    refresh();
   };
 }
 
-function escapeHtml(s) {
-  return s.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
-}
-
-el("refresh").addEventListener("click", findToken);
-findToken();
+el("refresh").addEventListener("click", refresh);
+refresh();

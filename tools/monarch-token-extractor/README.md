@@ -1,71 +1,106 @@
-# Monarch Token Extractor
+# Monarch Token Extractor v2
 
-A tiny Chrome extension that captures your active Monarch Money session token
-in one click. Reads from `localStorage`, `sessionStorage`, intercepted
-`Authorization` headers, and cookies — surfaces whichever it finds first.
+Chrome extension that captures your active Monarch session's Authorization
+header — and everything else that might be useful — in one click. No DevTools
+required.
 
-## Why this exists
+## Why v2
 
-Monarch put `api.monarch.com` behind Cloudflare's WAF, which blocks the
-programmatic email/password login flow that the `monarchmoney` Python library
-uses. The library reports `HTTP 404` because Cloudflare returns `403 / "You
-Shall Not Pass"` on the login endpoint when it sees the SDK's user-agent.
+v1 relied on `chrome.webRequest` (the extension's service worker passively
+observing network traffic). Chrome unloads service workers aggressively, so
+v1 missed every request that happened before the popup was opened — falling
+back to localStorage values that turned out to be session IDs, not auth
+tokens.
 
-The fix: skip the broken login and inject a token captured from a real
-browser session. The gateway's monarch service already supports this via the
-`MONARCH_TOKEN` env var — it just needs a fresh token every ~30 days.
+v2 adds a **content script injected into the Monarch page itself** that
+monkey-patches the page's own `fetch` and `XMLHttpRequest`. Every API call
+is recorded as it's made, regardless of when the popup opens or whether the
+service worker is alive.
 
-This extension makes capture a one-click operation instead of a DevTools dive.
-
-## Install (developer mode, local)
+## Install
 
 1. Open Chrome → `chrome://extensions`
 2. Toggle **Developer mode** on (top right)
 3. Click **Load unpacked**
-4. Select the `tools/monarch-token-extractor/` folder in this repo
-5. Pin the extension to the toolbar (puzzle-piece icon → pin "Monarch Token Extractor")
+4. Select the `tools/monarch-token-extractor/` folder
+5. Pin the extension to the toolbar
+
+If upgrading from v1: click **Reload** on the extension card so v2 takes effect.
 
 ## Use
 
-1. Go to https://app.monarch.com and log in
-2. Click the **Monarch Token Extractor** toolbar icon
-3. The popup shows the captured token. Click **Copy token**
-4. Paste into Claude (or directly into DigitalOcean → Settings → `MONARCH_TOKEN`)
+1. Visit https://app.monarch.com and log in (or reload if already logged in —
+   the content script needs to attach **before** the page makes its first
+   request, so a fresh page load is ideal)
+2. Click anything in the UI — a transaction, a filter, switch months — to
+   trigger an API call
+3. Click the extension icon
 
-If the popup shows "No auth token found":
-- Click anywhere in the Monarch UI to trigger an API request, then click **Re-scan**
-- Or reload the Monarch tab and try again
+The popup shows:
+- The most recent captured `Authorization` header
+- Source (`fetch` / `xhr` / `webrequest`)
+- Prefix (`Bearer` / `Token` / none) — important, the gateway needs the right format
+- The raw token value (prefix stripped)
+- A full history of every header captured this session
+- A preview of localStorage / sessionStorage / cookies
 
-## What it reads
-
-In order, until one succeeds:
-1. `localStorage` — Monarch's SPA typically persists session state here
-2. `sessionStorage` — fallback location
-3. `Authorization` header from intercepted API calls to `api.monarch.com` (via background.js)
-4. `cookies` for `monarch.com` matching `token`/`auth`/`session` patterns
+Two copy buttons:
+- **Copy auth header value** — just the raw token (no prefix), ready to paste as a `MONARCH_TOKEN` env var
+- **Copy full diagnostic JSON** — everything bundled into one JSON paste for debugging
 
 ## Files
 
 | File | Purpose |
 |---|---|
-| `manifest.json` | Extension declaration (Manifest V3) |
-| `popup.html` | UI |
-| `popup.js` | Logic — scans tab + copies to clipboard |
-| `background.js` | Service worker — passively records the Authorization header from Monarch API requests |
+| `manifest.json` | Manifest V3 declaration |
+| `content_main.js` | Runs in the page's JS context (`world: "MAIN"`). Monkey-patches `fetch` and `XMLHttpRequest`. Forwards captures to `content_bridge.js` via `window.postMessage`. |
+| `content_bridge.js` | Runs in the extension's isolated world. Listens for postMessage events from the page and forwards them to the background worker via `chrome.runtime.sendMessage`. |
+| `background.js` | Service worker. Persists captures to `chrome.storage.local`. Also runs a redundant `chrome.webRequest` listener as a safety net. |
+| `popup.html` + `popup.js` | UI. Reads from storage, renders captures, copies to clipboard. |
 
-## Permissions explained
+## Architecture
 
-- `cookies` — read cookies for monarch.com domains
-- `scripting` + `activeTab` — run a one-line script in the active tab to read localStorage/sessionStorage
-- `webRequest` + host permissions — observe outgoing requests' Authorization header (read-only; doesn't modify)
-- `storage` — reserved for future use (not currently used)
+```
+Monarch page                    extension
+─────────────                  ─────────────
+            fetch()/XHR
+            captured by
+                ▼
+        content_main.js  ──postMessage──▶  content_bridge.js
+                                                     │
+                                                     │  chrome.runtime.sendMessage
+                                                     ▼
+                                                background.js
+                                                     │
+                                                     │  chrome.storage.local.set
+                                                     ▼
+                                                  storage
+                                                     │
+                                                     │  chrome.storage.local.get
+                                                     ▼
+                                                  popup.js
+                                                     │
+                                                     │  clipboard.writeText
+                                                     ▼
+                                                   user
+```
 
-No data leaves your machine. The extension only puts the token on your clipboard
-when you click Copy.
+The redundant `chrome.webRequest` listener in `background.js` is a safety net
+for requests fired before our content script attaches (e.g., very early page
+load) or made from contexts the page patches can't reach (web workers).
+
+## Permissions
+
+| Permission | Why |
+|---|---|
+| `cookies` | Read HttpOnly cookies for monarch.com (visible only via chrome.cookies API, not document.cookie) |
+| `scripting` + `activeTab` | Run a one-line script in the active tab to read localStorage/sessionStorage from the popup |
+| `webRequest` + host permissions | Safety-net Authorization header observation |
+| `storage` | Persist captured headers across service-worker restarts |
+| `tabs` | Query the active tab URL |
 
 ## Trust model
 
-Browser extensions are powerful. Before installing, you can inspect every file
-in this folder — it's ~200 lines total and there's no obfuscation, no remote
-code load, no analytics. Read `popup.js`, `background.js`, and `manifest.json`
-top-to-bottom in a couple minutes.
+~450 lines total across 5 files. No remote code load, no analytics, no
+network calls of our own. Inspect every file in 10 minutes before installing.
+Tokens stay on your machine — only go where you paste them.
