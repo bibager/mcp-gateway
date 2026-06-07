@@ -433,9 +433,20 @@ async def get_filters() -> str:
         r = await client.post(
             f"{TODOIST_BASE}/sync",
             headers=_auth_headers(),
-            data={"sync_token": "*", "resource_types": '["filters"]'},
+            json={
+                "sync_token": "*",
+                "resource_types": ["filters"],
+                "commands": [],
+            },
         )
-        r.raise_for_status()
+        if r.status_code >= 400:
+            # Surface upstream's actual error body — it's far more useful than
+            # httpx's generic "400 Bad Request" message
+            return _json({
+                "error": "sync_failed",
+                "status": r.status_code,
+                "upstream_body": r.text[:1000],
+            })
         body = r.json()
         return _json({"filters": body.get("filters", [])})
 
