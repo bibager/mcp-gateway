@@ -24,8 +24,10 @@ Internet → Caddy (port 8080) → Service routing by host/path
                 │                             Bearer-guarded proxy ─▶ localhost-only FastMCP ─▶ Alpaca API
                 ├── ta.bibager.com       → Technical analysis (port 8011, Python)
                 │                             Pivots, VWAP, Volume Profile computed locally from Alpaca data
-                └── uw.bibager.com       → Unusual Whales     (port 8012, Python)
-                                              HTTP-streaming proxy ─▶ api.unusualwhales.com/api/mcp
+                ├── uw.bibager.com       → Unusual Whales     (port 8012, Python)
+                │                             HTTP-streaming proxy ─▶ api.unusualwhales.com/api/mcp
+                └── datarova.bibager.com → Datarova rank tracker (port 8013, Python)
+                                              Cognito refresh-token flow ─▶ api.datarova.com
 ```
 
 ### Key Files
@@ -56,7 +58,8 @@ Internet → Caddy (port 8080) → Service routing by host/path
     ├── pacvue/server.py   # HTTP-streaming proxy to mcp.pacvue.com/mcp
     ├── alpaca/server.py   # Bearer-guarded proxy to localhost alpaca-mcp-server (live trading)
     ├── ta/server.py       # Technical analysis (pivots, VWAP, volume profile) over Alpaca data
-    └── uw/server.py       # HTTP-streaming proxy to api.unusualwhales.com/api/mcp
+    ├── uw/server.py       # HTTP-streaming proxy to api.unusualwhales.com/api/mcp
+    └── datarova/server.py # Datarova rank tracker (Cognito refresh-token flow)
 ```
 
 ## Services
@@ -157,6 +160,21 @@ Internet → Caddy (port 8080) → Service routing by host/path
 - **MCP Tools**: forwarded from Unusual Whales (count varies by subscription tier)
 - **OAuth**: Synthetic at our side
 
+### Datarova (port 8013)
+- **Purpose**: Amazon brand keyword rank tracker reverse-engineered from `app.datarova.com` (no public API exists). Surfaces the Rank Tracker (project / ASIN / keyword rank time series) and Keyword Spy / ASIN Insights cross-section. Built initially for tracking the Manuka brand on amazon.com.
+- **Auth**: AWS Cognito (us-west-2 user pool `us-west-2_0CKqzWHDX`, client_id `5dcti49pggi19uqs3df8iae3o1`). We hold the long-lived refresh token in `DATAROVA_REFRESH_TOKEN` and call `cognito-idp.us-west-2.amazonaws.com` with `REFRESH_TOKEN_AUTH` on demand to mint fresh access+id JWTs. Refresh tokens last ~30 days; access/id tokens last 1 hour. Token cache keys off the access JWT's `exp` claim with a 60-second safety margin.
+- **Architecture**: Native FastMCP service. Sends 3 headers per request to `api.datarova.com`: `Authorization: Bearer <access>`, `x-id-token: <id>`, and Origin/Referer spoofed to `https://app.datarova.com`. The `x-plan` header is documented but **verified NOT required** — endpoints accept requests without it.
+- **Recon source**: `tools/datarova-api-recon/` Chrome extension (Manifest V3, fetch/XHR monkey-patcher) used to capture API calls. Diagnostic JSONs got us the auth model + endpoints in two passes.
+- **MCP Tools (11)**:
+  - **Discovery**: `get_account_summary` (plan/limits/usage), `get_latest_data_date` (when data last refreshed)
+  - **Inventory**: `list_projects(search?)`, `list_keywords(marketplace)`, `list_asins(marketplace)`, `get_keyword_tags(project_id)`
+  - **Rank tracker (core)**: `get_rank_history_by_asin(project_id, asin, range_type, from?, to?)`, `get_keyword_rank_history(project_id, asin, keyword, from?, to?)`
+  - **Market data**: `get_keyword_market_data(keyword, asin?, top_asin?, from, to, range_type, marketplace)` — drives both Keyword Spy AND ASIN Insights
+  - **Product enrichment**: `get_asin_details(asin, marketplace)` — title/price/image for any ASIN
+  - **Mutation**: `add_keyword_to_project(project_id, asin, keyword, marketplace)` — counts vs `keywordsLimit`
+- **ASIN Insights gotcha** (Basic tier): There is no separate "list keywords this competitor ASIN ranks for" endpoint surfaced. On Basic plan, ASIN Insights = iterating your existing tracked keywords through `/records/record` with the competitor as `topAsin`. The bulk-keywords-for-arbitrary-ASIN feature appears paywalled behind the PostHog flag `asin-insights-additional-options`.
+- **OAuth**: Synthetic at our side
+
 ## Routing (Caddyfile)
 
 Host-based routing takes priority (prevents cross-domain OAuth hijack):
@@ -170,9 +188,10 @@ Host-based routing takes priority (prevents cross-domain OAuth hijack):
 8. `alpaca.bibager.com` → 8009 (proxy; upstream alpaca-mcp-server on 8010 is localhost-only)
 9. `ta.bibager.com` → 8011 (technical analysis service)
 10. `uw.bibager.com` → 8012 (Unusual Whales proxy)
-11. GA OAuth endpoints (`/.well-known/*`, `/authorize`, `/token`, etc.) → 8002
-12. Path-based fallbacks: `/ga/*`, `/monarch/*`, `/todoist/*`, `/gitlab/*`, `/weather/*`, `/trackiq/*`, `/framer/*`, `/pacvue/*`, `/alpaca/*`, `/ta/*`, `/uw/*`
-13. Default: 404
+11. `datarova.bibager.com` → 8013 (Amazon brand rank tracker)
+12. GA OAuth endpoints (`/.well-known/*`, `/authorize`, `/token`, etc.) → 8002
+13. Path-based fallbacks: `/ga/*`, `/monarch/*`, `/todoist/*`, `/gitlab/*`, `/weather/*`, `/trackiq/*`, `/framer/*`, `/pacvue/*`, `/alpaca/*`, `/ta/*`, `/uw/*`, `/datarova/*`
+14. Default: 404
 
 ## Environment Variables
 
@@ -201,6 +220,9 @@ Host-based routing takes priority (prevents cross-domain OAuth hijack):
 | `ALPACA_SECRET_KEY` | Alpaca | Alpaca Trading API secret key |
 | `ALPACA_PAPER_TRADE` | Alpaca | `"true"` for paper-trading simulator, `"false"` for live trading |
 | `UW_API_KEY` | Unusual Whales | UUID from `unusualwhales.com/settings/api-dashboard` (Bearer-prefix) |
+| `DATAROVA_REFRESH_TOKEN` | Datarova | Long-lived Cognito refresh token (~30 day TTL); captured via `tools/datarova-api-recon/` extension |
+| `DATAROVA_COGNITO_CLIENT_ID` | Datarova | Optional override; defaults to `5dcti49pggi19uqs3df8iae3o1` |
+| `DATAROVA_X_PLAN` | Datarova | Optional `x-plan` JWT fallback; verified NOT required in production |
 | `SERVER_URL` | All | Per-service base URL override (e.g. `https://framer.bibager.com`) |
 
 ## Conventions
@@ -250,6 +272,7 @@ Daily 9:00am CST. Cron → Todoist (P1+P2) → format → Claude Haiku → Gmail
 - **Alpaca trading** (May 2026): First self-hosted upstream — `alpaca-mcp-server@2.0.1` runs locally on `127.0.0.1:8010` (no built-in auth, hence localhost-only); our Bearer-guarded proxy on 8009 fronts it with synthetic OAuth. 61 tools (live count) across orders, positions, watchlists, stock/crypto/options market data. Started in **live** mode (`ALPACA_PAPER_TRADE=false`) — flip to `true` for paper.
 - **TA service** (May 2026): Local-compute technical analysis over Alpaca bars. 4 tools — Standard/Camarilla/Woodie pivot points, session VWAP, anchored VWAP, and volume profile (POC/VAH/VAL with uniform per-bar volume distribution). Reuses `ALPACA_API_KEY`/`SECRET_KEY` env vars; first non-proxy gateway service that consumes another gateway service's underlying data source.
 - **Unusual Whales proxy** (May 2026): HTTP-streaming proxy to `api.unusualwhales.com/api/mcp` with Bearer rewrite. Surfaces options flow, dark pool, congressional trades, ETF holdings. Critical setup gotcha: the public-facing `unusualwhales.com/public-api/mcp` URL is the docs page, NOT the MCP endpoint — use `api.unusualwhales.com/api/mcp` upstream.
+- **Datarova rank tracker** (Jun 2026): Reverse-engineered Amazon brand keyword rank tracker (`app.datarova.com` has no public API). First service to do **server-side AWS Cognito refresh-token flow** — we hold a ~30-day refresh token in env and mint fresh access/id JWTs on demand instead of asking the user to recapture hourly. 11 tools across rank tracker, market data (Keyword Spy / ASIN Insights), product enrichment. Endpoint discovery powered by `tools/datarova-api-recon/` Chrome extension. Key finding: on Basic tier, ASIN Insights isn't a separate "list keywords for any ASIN" endpoint — it's `/records/record` iterated over your tracked keywords with the competitor as `topAsin`; the bulk-keywords feature is gated behind a PostHog flag.
 
 ## Open follow-ups
 

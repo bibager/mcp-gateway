@@ -245,6 +245,28 @@ async def get_account_summary() -> str:
 
 
 @mcp.tool(
+    name="get_asin_details",
+    annotations={"readOnlyHint": True, "destructiveHint": False},
+)
+async def get_asin_details(asin: str, marketplace: str = "US") -> str:
+    """
+    Get product info (title, price, image, brand) for any Amazon ASIN.
+
+    Useful for enriching results from the rank-tracker and market-data tools —
+    pair this with ``get_keyword_market_data(..., top_asin=X)`` to know what
+    product X actually is. Works on ANY ASIN, not just ones you track.
+
+    Args:
+        asin: Amazon ASIN (e.g. 'B072276HMC').
+        marketplace: Marketplace code, default 'US'.
+    """
+    data = await _datarova_request(
+        "POST", "/asin-price-detail", form={"ASIN": asin, "marketplace": marketplace}
+    )
+    return _json(data)
+
+
+@mcp.tool(
     name="get_latest_data_date",
     annotations={"readOnlyHint": True, "destructiveHint": False},
 )
