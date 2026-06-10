@@ -1,0 +1,39 @@
+{
+  "manifest_version": 3,
+  "name": "Datarova API Recon",
+  "version": "1.0.0",
+  "description": "Records every Authorization header + cookies + localStorage from Datarova while you click around. Used to reverse-engineer their internal API so we can build an MCP wrapper for keyword rank tracking.",
+  "permissions": [
+    "cookies",
+    "scripting",
+    "activeTab",
+    "webRequest",
+    "storage",
+    "tabs"
+  ],
+  "host_permissions": [
+    "https://*.datarova.com/*"
+  ],
+  "content_scripts": [
+    {
+      "matches": ["https://*.datarova.com/*"],
+      "js": ["content_main.js"],
+      "run_at": "document_start",
+      "world": "MAIN",
+      "all_frames": false
+    },
+    {
+      "matches": ["https://*.datarova.com/*"],
+      "js": ["content_bridge.js"],
+      "run_at": "document_start",
+      "all_frames": false
+    }
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Datarova API Recon"
+  }
+}
