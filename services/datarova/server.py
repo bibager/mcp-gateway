@@ -94,6 +94,36 @@ def _decode_jwt_payload(jwt: str) -> dict[str, Any]:
     return json.loads(base64.urlsafe_b64decode(padded).decode("utf-8"))
 
 
+def _deep_form_encode(obj: Any, prefix: str = "") -> str:
+    """Serialize a nested dict/list to PHP-style ``key[subkey]=value`` form.
+
+    Mirrors Datarova frontend's serializer (E5t in app.datarova.com bundle):
+    arrays become ``key[0]=a&key[1]=b``, nested dicts become ``key[sub]=v``.
+    Datarova's /projects/add-keyword (and possibly other write endpoints)
+    rejects standard repeated-key encoding with "Invalid payload".
+    """
+    from urllib.parse import quote
+
+    parts: list[str] = []
+    if isinstance(obj, dict):
+        items = obj.items()
+    elif isinstance(obj, (list, tuple)):
+        items = enumerate(obj)
+    else:
+        return f"{prefix}={quote(str(obj), safe='')}"
+
+    for key, val in items:
+        encoded_key = quote(str(key), safe="")
+        next_prefix = f"{prefix}[{encoded_key}]" if prefix else encoded_key
+        if isinstance(val, (dict, list, tuple)):
+            parts.append(_deep_form_encode(val, next_prefix))
+        elif isinstance(val, bool):
+            parts.append(f"{next_prefix}={'true' if val else 'false'}")
+        else:
+            parts.append(f"{next_prefix}={quote(str(val), safe='')}")
+    return "&".join(parts)
+
+
 async def _refresh_cognito_tokens() -> tuple[str, str]:
     """Call Cognito IdP InitiateAuth with REFRESH_TOKEN_AUTH and return (access, id)."""
     async with httpx.AsyncClient(timeout=15.0) as client:
@@ -152,11 +182,14 @@ async def _datarova_request(
     *,
     params: Optional[dict[str, Any]] = None,
     form: Optional[dict[str, Any]] = None,
+    deep_form: Optional[dict[str, Any]] = None,
     json_body: Optional[dict[str, Any]] = None,
 ) -> Any:
     """Make an authenticated request to api.datarova.com, with one retry on 401.
 
     `path` is the path segment (e.g. ``/users/details``); we prepend the host.
+    Use ``deep_form`` for endpoints (like /projects/add-keyword) that expect
+    PHP-style bracketed array encoding rather than flat repeated keys.
     """
     access, id_token = await _get_fresh_tokens()
 
@@ -176,7 +209,10 @@ async def _datarova_request(
     kwargs: dict[str, Any] = {"headers": headers}
     if params is not None:
         kwargs["params"] = params
-    if form is not None:
+    if deep_form is not None:
+        kwargs["content"] = _deep_form_encode(deep_form)
+        headers["Content-Type"] = "application/x-www-form-urlencoded"
+    elif form is not None:
         kwargs["data"] = form
         headers["Content-Type"] = "application/x-www-form-urlencoded"
     elif json_body is not None:
@@ -470,31 +506,38 @@ async def get_keyword_market_data(
 )
 async def add_keyword_to_project(
     project_id: int,
-    asin: str,
-    keyword: str,
+    keywords: list[str],
     marketplace: str = "US",
+    track_rank: bool = True,
 ) -> str:
     """
-    Add a keyword to a project's rank tracker.
+    Add one or more keywords to a project's rank tracker (batch supported).
+
+    Keywords attach to the project — not to a specific ASIN. The project's
+    existing ASINs are tracked against each new keyword automatically.
 
     Counts against your plan's ``keywordsLimit`` (use ``get_account_summary``
-    to check usage). Returns the API response verbatim — may contain an error
-    if the limit is hit or the keyword already exists.
+    to check usage). The response includes ``existingKeywordsCount`` (already
+    tracked, ignored) and ``newKeywordsCount`` (actually added). If the
+    request would exceed your project limit, the response status is
+    ``WARNING`` with code ``PROJECT_KEYWORDS_LIMIT``.
 
     Args:
-        project_id: Numeric project ID.
-        asin: Amazon ASIN to associate the keyword with.
-        keyword: Keyword phrase to track.
+        project_id: Numeric project ID (from ``list_projects``).
+        keywords: List of keyword phrases to track.
         marketplace: Marketplace code, default 'US'.
+        track_rank: Whether to begin tracking ranks immediately. Default True.
     """
+    if not keywords:
+        raise ValueError("keywords must be a non-empty list")
     data = await _datarova_request(
         "POST",
         "/projects/add-keyword",
-        form={
+        deep_form={
             "project_id": project_id,
-            "asin": asin,
-            "keyword": keyword,
+            "keywords": keywords,
             "marketplace": marketplace,
+            "trackRank": track_rank,
         },
     )
     return _json(data)
