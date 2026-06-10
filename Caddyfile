@@ -64,6 +64,12 @@
         reverse_proxy localhost:8012
     }
 
+    # --- Datarova MCP: datarova.bibager.com (Amazon brand rank tracker) ---
+    @datarova header Host datarova.bibager.com
+    handle @datarova {
+        reverse_proxy localhost:8013
+    }
+
     # --- GA MCP: mcp.bibager.com/ga/* and root OAuth ---
     @ga_path path /ga/*
     handle @ga_path {
@@ -116,6 +122,10 @@
 
     handle_path /uw/* {
         reverse_proxy localhost:8012
+    }
+
+    handle_path /datarova/* {
+        reverse_proxy localhost:8013
     }
 
     handle {
