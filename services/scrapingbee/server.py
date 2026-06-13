@@ -148,7 +148,13 @@ def _to_decimal_price(p: Any) -> Optional[float]:
 
 
 def _parse_iso_date_loose(s: Any) -> Optional[str]:
-    """Try to coax an arbitrary date string into ISO YYYY-MM-DD."""
+    """Try to coax an arbitrary date string into ISO YYYY-MM-DD.
+
+    ScrapingBee's product-endpoint review timestamps come back as
+    ``"Reviewed in the United States April 27, 2026"`` (no "on" preposition).
+    The full-page reviews format is ``"... on May 15, 2025"``. Handle both
+    plus already-ISO strings.
+    """
     if not s:
         return None
     s = str(s).strip()
@@ -158,18 +164,15 @@ def _parse_iso_date_loose(s: Any) -> Optional[str]:
             return dt.datetime.strptime(s, fmt).strftime("%Y-%m-%d")
         except ValueError:
             continue
-    # Amazon-style: "Reviewed in the United States on May 15, 2025"
-    m = re.search(r"on\s+([A-Z][a-z]+ \d+,\s*\d{4})", s)
+    # Anywhere in the string: "Month DD, YYYY" — covers both Amazon dialects.
+    m = re.search(r"([A-Z][a-z]+)\s+(\d{1,2}),\s*(\d{4})", s)
     if m:
         try:
-            return dt.datetime.strptime(m.group(1).replace(",", ""), "%B %d %Y").strftime("%Y-%m-%d")
+            return dt.datetime.strptime(
+                f"{m.group(1)} {m.group(2)} {m.group(3)}", "%B %d %Y"
+            ).strftime("%Y-%m-%d")
         except ValueError:
             pass
-    # Plain "May 15, 2025"
-    try:
-        return dt.datetime.strptime(s.replace(",", ""), "%B %d %Y").strftime("%Y-%m-%d")
-    except ValueError:
-        pass
     return s  # give back whatever we got rather than discard
 
 
