@@ -82,6 +82,12 @@
         reverse_proxy localhost:8015
     }
 
+    # --- Oxylabs MCP: oxylabs.bibager.com (Amazon Web Scraper API — A/B against ScrapingBee) ---
+    @oxylabs header Host oxylabs.bibager.com
+    handle @oxylabs {
+        reverse_proxy localhost:8016
+    }
+
     # --- GA MCP: mcp.bibager.com/ga/* and root OAuth ---
     @ga_path path /ga/*
     handle @ga_path {
@@ -146,6 +152,10 @@
 
     handle_path /scrapingbee/* {
         reverse_proxy localhost:8015
+    }
+
+    handle_path /oxylabs/* {
+        reverse_proxy localhost:8016
     }
 
     handle {
