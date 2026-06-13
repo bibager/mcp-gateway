@@ -3,3 +3,4 @@ __pycache__/
 *.pyc
 .do-spec-datarova.yaml
 .do-spec-keepa.yaml
+.do-spec-sb.yaml

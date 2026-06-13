@@ -76,6 +76,12 @@
         reverse_proxy localhost:8014
     }
 
+    # --- ScrapingBee MCP: scrapingbee.bibager.com (live Amazon competitor content + reviews) ---
+    @scrapingbee header Host scrapingbee.bibager.com
+    handle @scrapingbee {
+        reverse_proxy localhost:8015
+    }
+
     # --- GA MCP: mcp.bibager.com/ga/* and root OAuth ---
     @ga_path path /ga/*
     handle @ga_path {
@@ -136,6 +142,10 @@
 
     handle_path /keepa/* {
         reverse_proxy localhost:8014
+    }
+
+    handle_path /scrapingbee/* {
+        reverse_proxy localhost:8015
     }
 
     handle {

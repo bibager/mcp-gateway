@@ -29,6 +29,7 @@ COPY services/ta/requirements.txt /tmp/ta-requirements.txt
 COPY services/uw/requirements.txt /tmp/uw-requirements.txt
 COPY services/datarova/requirements.txt /tmp/datarova-requirements.txt
 COPY services/keepa/requirements.txt /tmp/keepa-requirements.txt
+COPY services/scrapingbee/requirements.txt /tmp/scrapingbee-requirements.txt
 
 RUN pip install --no-cache-dir \
     -r /tmp/monarch-requirements.txt \
@@ -43,7 +44,8 @@ RUN pip install --no-cache-dir \
     -r /tmp/ta-requirements.txt \
     -r /tmp/uw-requirements.txt \
     -r /tmp/datarova-requirements.txt \
-    -r /tmp/keepa-requirements.txt
+    -r /tmp/keepa-requirements.txt \
+    -r /tmp/scrapingbee-requirements.txt
 
 COPY Caddyfile .
 COPY supervisord.conf /etc/supervisor/conf.d/supervisord.conf
