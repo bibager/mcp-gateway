@@ -952,33 +952,45 @@ def _status_dict(status_obj: Any) -> dict[str, Any]:
 )
 async def get_token_status() -> str:
     """
-    Get your current Keepa token state — balance, refill rate, time to refill.
+    Get your current Keepa token state — balance, refill rate, time to refill,
+    subscription expiry.
 
-    Use this to pace heavy batch jobs. If the subscription is "Payment Pending"
-    or inactive, this surfaces a zero balance and explains why.
+    Calls Keepa's ``/token`` endpoint directly (HTTP, no tokens consumed)
+    rather than reading the keepa-lib's cached ``status`` object. The cache
+    is empty on a fresh container until the first data call lands, which
+    used to cause a misleading "0 tokens / null status" snapshot right
+    after deploys. This bypass returns the same numbers Keepa's dashboard
+    shows, every time.
     """
     try:
-        client = await _get_client()
+        async with httpx.AsyncClient(timeout=15.0) as http:
+            r = await http.get(
+                "https://api.keepa.com/token",
+                params={"key": KEEPA_API_KEY},
+            )
+        if r.status_code != 200:
+            return _json({
+                "ok": False,
+                "error": f"Keepa /token HTTP {r.status_code}: {r.text[:200]}",
+                "tokens_left": 0,
+            })
+        data = r.json()
     except Exception as e:
-        return _json({
-            "ok": False,
-            "error": _format_keepa_error(e),
-            "tokens_left": 0,
-        })
-    status = _status_dict(getattr(client, "status", None))
-    refill_in = status.get("refillIn")
+        return _json({"ok": False, "error": str(e), "tokens_left": 0})
+
+    refill_in = data.get("refillIn")
     return _json({
         "ok": True,
-        "tokens_left": getattr(client, "tokens_left", None),
-        "refill_rate_per_minute": status.get("refillRate"),
+        "tokens_left": data.get("tokensLeft"),
+        "refill_rate_per_minute": data.get("refillRate"),
         "refill_in_seconds": (refill_in / 1000) if isinstance(refill_in, (int, float)) else None,
-        "tokens_consumed_total": status.get("tokensConsumed"),
-        "token_flow_reduction": status.get("tokenFlowReduction"),
+        "tokens_consumed_total": data.get("tokensConsumed"),
+        "token_flow_reduction": data.get("tokenFlowReduction"),
         "subscription": {
-            "expires_at_epoch_ms": status.get("subscriptionExpires"),
-            "max_tokens": status.get("maxTokens"),
+            "expires_at_epoch_ms": data.get("subscriptionExpires"),
+            "max_tokens": data.get("maxTokens"),
         },
-        "raw_status": status,
+        "raw_status": data,
     })
 
 
