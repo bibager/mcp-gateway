@@ -492,8 +492,10 @@ async def get_price_history(
 
     product = await _fetch_product_history(asin, domain, want_offers=(key == "buybox"))
     data = product.get("data") or {}
-    times = list(data.get(f"{series}_time") or [])
-    values = list(data.get(series) or [])
+    times_arr = data.get(f"{series}_time")
+    values_arr = data.get(series)
+    times = list(times_arr) if times_arr is not None else []
+    values = list(values_arr) if values_arr is not None else []
     if len(times) == 0 or len(values) == 0:
         return _json({
             "asin": asin,
@@ -540,8 +542,10 @@ async def get_sales_rank_history(
     """
     product = await _fetch_product_history(asin, domain)
     data = product.get("data") or {}
-    times = list(data.get("SALES_time") or [])
-    values = list(data.get("SALES") or [])
+    times_arr = data.get("SALES_time")
+    values_arr = data.get("SALES")
+    times = list(times_arr) if times_arr is not None else []
+    values = list(values_arr) if values_arr is not None else []
     cat_tree = product.get("categoryTree") or []
     pts = _filter_series(
         times, values, _parsed_count,
@@ -581,8 +585,10 @@ async def get_buybox_history(
     """
     product = await _fetch_product_history(asin, domain, want_offers=True)
     data = product.get("data") or {}
-    times = list(data.get("BUY_BOX_SHIPPING_time") or [])
-    prices = list(data.get("BUY_BOX_SHIPPING") or [])
+    times_arr = data.get("BUY_BOX_SHIPPING_time")
+    prices_arr = data.get("BUY_BOX_SHIPPING")
+    times = list(times_arr) if times_arr is not None else []
+    prices = list(prices_arr) if prices_arr is not None else []
     seller_hist = product.get("buyBoxSellerIdHistory") or []
 
     price_pts = _filter_series(
@@ -634,10 +640,14 @@ async def get_rating_history(
     product = await _fetch_product_history(asin, domain, want_rating=True)
     data = product.get("data") or {}
 
-    rating_times = list(data.get("RATING_time") or [])
-    rating_vals = list(data.get("RATING") or [])
-    count_times = list(data.get("COUNT_REVIEWS_time") or [])
-    count_vals = list(data.get("COUNT_REVIEWS") or [])
+    rt_arr = data.get("RATING_time")
+    rv_arr = data.get("RATING")
+    ct_arr = data.get("COUNT_REVIEWS_time")
+    cv_arr = data.get("COUNT_REVIEWS")
+    rating_times = list(rt_arr) if rt_arr is not None else []
+    rating_vals = list(rv_arr) if rv_arr is not None else []
+    count_times = list(ct_arr) if ct_arr is not None else []
+    count_vals = list(cv_arr) if cv_arr is not None else []
 
     rating_pts = _filter_series(
         rating_times, rating_vals, _parsed_rating,
