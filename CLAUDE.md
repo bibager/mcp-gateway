@@ -26,8 +26,10 @@ Internet → Caddy (port 8080) → Service routing by host/path
                 │                             Pivots, VWAP, Volume Profile computed locally from Alpaca data
                 ├── uw.bibager.com       → Unusual Whales     (port 8012, Python)
                 │                             HTTP-streaming proxy ─▶ api.unusualwhales.com/api/mcp
-                └── datarova.bibager.com → Datarova rank tracker (port 8013, Python)
-                                              Cognito refresh-token flow ─▶ api.datarova.com
+                ├── datarova.bibager.com → Datarova rank tracker (port 8013, Python)
+                │                             Cognito refresh-token flow ─▶ api.datarova.com
+                └── keepa.bibager.com    → Keepa historical data (port 8014, Python)
+                                              keepa PyPI lib wrapper ─▶ api.keepa.com
 ```
 
 ### Key Files
@@ -59,7 +61,8 @@ Internet → Caddy (port 8080) → Service routing by host/path
     ├── alpaca/server.py   # Bearer-guarded proxy to localhost alpaca-mcp-server (live trading)
     ├── ta/server.py       # Technical analysis (pivots, VWAP, volume profile) over Alpaca data
     ├── uw/server.py       # HTTP-streaming proxy to api.unusualwhales.com/api/mcp
-    └── datarova/server.py # Datarova rank tracker (Cognito refresh-token flow)
+    ├── datarova/server.py # Datarova rank tracker (Cognito refresh-token flow)
+    └── keepa/server.py    # Keepa historical data (price/BSR/buybox time series)
 ```
 
 ## Services
@@ -175,6 +178,20 @@ Internet → Caddy (port 8080) → Service routing by host/path
 - **ASIN Insights gotcha** (Basic tier): There is no separate "list keywords this competitor ASIN ranks for" endpoint surfaced. On Basic plan, ASIN Insights = iterating your existing tracked keywords through `/records/record` with the competitor as `topAsin`. The bulk-keywords-for-arbitrary-ASIN feature appears paywalled behind the PostHog flag `asin-insights-additional-options`.
 - **OAuth**: Synthetic at our side
 
+### Keepa (port 8014)
+- **Purpose**: Amazon historical data — price/BSR (sales rank)/buy-box/rating time series and competitive discovery (product finder, deals, bestsellers, seller lookup). The historical data layer for the Manuka Doctor ad-optimization workflow.
+- **Auth**: `KEEPA_API_KEY` env var (private key from `keepa.com/#!api`). Token-metered subscription (20 tokens/min at the €49/mo tier we're on).
+- **Architecture**: Native FastMCP service. Built on the `keepa` PyPI package — never hand-roll the KeepaTime conversion, CSV-history index map, or token management since the lib already abstracts them. Sync Keepa API wrapped in `asyncio.to_thread`. Lazy client init so the service starts cleanly even when the subscription is "Payment Pending" (constructor pings the API).
+- **Normalization (mandatory)**: All timestamps → ISO 8601 UTC; all prices → decimal dollars from integer cents; all `-1` values → null (Keepa's "no data / out of stock" sentinel). Agents NEVER see raw Keepa encodings.
+- **Cache**: Simple SQLite kv store at `KEEPA_CACHE_PATH` (default `/tmp/keepa-cache.db`, TTL via `KEEPA_CACHE_TTL_SECONDS`, default 24h). Saves tokens on repeated history pulls within a single deploy. **Ephemeral on DO App Platform** — resets across deploys; persist responses externally if a durable historical baseline is needed.
+- **MCP Tools (12)**:
+  - **Core / history**: `get_product_snapshot(asins, domain)` — token-light current state batch (≤100 ASINs); `get_price_history(asin, price_type, start?, end?, domain)` where `price_type ∈ {amazon, new, used, buybox, fbm, fba, list_price}`; `get_sales_rank_history(asin, start?, end?, domain)` with category_node; `get_buybox_history(asin, start?, end?, domain)` price + seller (needs offers, more tokens); `get_rating_history(asin, start?, end?, domain)`; `get_product_stats(asins, days=90, domain)` cheap interval summary across many ASINs
+  - **Discovery**: `find_products(filters, domain, per_page)`; `get_bestsellers(category_node, domain)`; `get_deals(filters, domain)` promo monitoring; `get_seller(seller_id, domain)`; `search_products(term, domain, per_page)`
+  - **Ops**: `get_token_status()` — balance, refill rate, time-to-refill, subscription expiry
+- **Domain mapping**: US=1 (default), UK=2, DE=3, FR=4, JP=5, CA=6, CN=7, IT=8, ES=9, IN=10, MX=11, BR=12, AU=13. Default US per the Manuka Doctor US Seller account; only US validated for v1.
+- **OAuth**: Synthetic at our side
+- **⚠ Payment Pending caveat**: At time of build the Keepa subscription showed "Payment Pending" with 0 available tokens. The service deploys and `get_token_status` returns gracefully, but tool calls that require tokens will error until the subscription activates (€49/mo for 20 tokens/min).
+
 ## Routing (Caddyfile)
 
 Host-based routing takes priority (prevents cross-domain OAuth hijack):
@@ -189,9 +206,10 @@ Host-based routing takes priority (prevents cross-domain OAuth hijack):
 9. `ta.bibager.com` → 8011 (technical analysis service)
 10. `uw.bibager.com` → 8012 (Unusual Whales proxy)
 11. `datarova.bibager.com` → 8013 (Amazon brand rank tracker)
-12. GA OAuth endpoints (`/.well-known/*`, `/authorize`, `/token`, etc.) → 8002
-13. Path-based fallbacks: `/ga/*`, `/monarch/*`, `/todoist/*`, `/gitlab/*`, `/weather/*`, `/trackiq/*`, `/framer/*`, `/pacvue/*`, `/alpaca/*`, `/ta/*`, `/uw/*`, `/datarova/*`
-14. Default: 404
+12. `keepa.bibager.com` → 8014 (Keepa historical data)
+13. GA OAuth endpoints (`/.well-known/*`, `/authorize`, `/token`, etc.) → 8002
+14. Path-based fallbacks: `/ga/*`, `/monarch/*`, `/todoist/*`, `/gitlab/*`, `/weather/*`, `/trackiq/*`, `/framer/*`, `/pacvue/*`, `/alpaca/*`, `/ta/*`, `/uw/*`, `/datarova/*`, `/keepa/*`
+15. Default: 404
 
 ## Environment Variables
 
@@ -223,6 +241,10 @@ Host-based routing takes priority (prevents cross-domain OAuth hijack):
 | `DATAROVA_REFRESH_TOKEN` | Datarova | Long-lived Cognito refresh token (~30 day TTL); captured via `tools/datarova-api-recon/` extension |
 | `DATAROVA_COGNITO_CLIENT_ID` | Datarova | Optional override; defaults to `5dcti49pggi19uqs3df8iae3o1` |
 | `DATAROVA_X_PLAN` | Datarova | Optional `x-plan` JWT fallback; verified NOT required in production |
+| `KEEPA_API_KEY` | Keepa | Private API key from `keepa.com/#!api` (paid subscription, token-metered) |
+| `KEEPA_DEFAULT_DOMAIN` | Keepa | Optional; defaults to `US` (Keepa domainId 1) |
+| `KEEPA_CACHE_PATH` | Keepa | Optional SQLite cache path (default `/tmp/keepa-cache.db`; ephemeral on DO App Platform) |
+| `KEEPA_CACHE_TTL_SECONDS` | Keepa | Optional cache TTL in seconds (default 86400 = 24h) |
 | `SERVER_URL` | All | Per-service base URL override (e.g. `https://framer.bibager.com`) |
 
 ## Conventions
@@ -273,6 +295,7 @@ Daily 9:00am CST. Cron → Todoist (P1+P2) → format → Claude Haiku → Gmail
 - **TA service** (May 2026): Local-compute technical analysis over Alpaca bars. 4 tools — Standard/Camarilla/Woodie pivot points, session VWAP, anchored VWAP, and volume profile (POC/VAH/VAL with uniform per-bar volume distribution). Reuses `ALPACA_API_KEY`/`SECRET_KEY` env vars; first non-proxy gateway service that consumes another gateway service's underlying data source.
 - **Unusual Whales proxy** (May 2026): HTTP-streaming proxy to `api.unusualwhales.com/api/mcp` with Bearer rewrite. Surfaces options flow, dark pool, congressional trades, ETF holdings. Critical setup gotcha: the public-facing `unusualwhales.com/public-api/mcp` URL is the docs page, NOT the MCP endpoint — use `api.unusualwhales.com/api/mcp` upstream.
 - **Datarova rank tracker** (Jun 2026): Reverse-engineered Amazon brand keyword rank tracker (`app.datarova.com` has no public API). First service to do **server-side AWS Cognito refresh-token flow** — we hold a ~30-day refresh token in env and mint fresh access/id JWTs on demand instead of asking the user to recapture hourly. 11 tools across rank tracker, market data (Keyword Spy / ASIN Insights), product enrichment. Endpoint discovery powered by `tools/datarova-api-recon/` Chrome extension. Key finding: on Basic tier, ASIN Insights isn't a separate "list keywords for any ASIN" endpoint — it's `/records/record` iterated over your tracked keywords with the competitor as `topAsin`; the bulk-keywords feature is gated behind a PostHog flag.
+- **Keepa historical data** (Jun 2026): Amazon historical price / BSR / buy-box / rating time series + competitive discovery via the official `keepa` PyPI package. 12 tools. Heavy normalization at the wrapper layer (KeepaTime → ISO 8601, integer cents → decimal dollars, `-1` sentinel → null) so agents never see raw Keepa encodings. Lazy Keepa client init means the service deploys cleanly even when the subscription is "Payment Pending" (constructor pings the API). Simple SQLite kv cache at `/tmp/keepa-cache.db` saves tokens on repeated history pulls within a deploy — ephemeral on DO App Platform.
 
 ## Open follow-ups
 
