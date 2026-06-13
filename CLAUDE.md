@@ -28,8 +28,10 @@ Internet → Caddy (port 8080) → Service routing by host/path
                 │                             HTTP-streaming proxy ─▶ api.unusualwhales.com/api/mcp
                 ├── datarova.bibager.com → Datarova rank tracker (port 8013, Python)
                 │                             Cognito refresh-token flow ─▶ api.datarova.com
-                └── keepa.bibager.com    → Keepa historical data (port 8014, Python)
-                                              keepa PyPI lib wrapper ─▶ api.keepa.com
+                ├── keepa.bibager.com    → Keepa historical data (port 8014, Python)
+                │                             keepa PyPI lib wrapper ─▶ api.keepa.com
+                └── scrapingbee.bibager.com → ScrapingBee Amazon content (port 8015, Python)
+                                              httpx ─▶ app.scrapingbee.com/api/v1/amazon/*
 ```
 
 ### Key Files
@@ -62,7 +64,8 @@ Internet → Caddy (port 8080) → Service routing by host/path
     ├── ta/server.py       # Technical analysis (pivots, VWAP, volume profile) over Alpaca data
     ├── uw/server.py       # HTTP-streaming proxy to api.unusualwhales.com/api/mcp
     ├── datarova/server.py # Datarova rank tracker (Cognito refresh-token flow)
-    └── keepa/server.py    # Keepa historical data (price/BSR/buybox time series)
+    ├── keepa/server.py    # Keepa historical data (price/BSR/buybox time series)
+    └── scrapingbee/server.py # ScrapingBee Amazon: product, search, reviews, offers
 ```
 
 ## Services
@@ -192,6 +195,28 @@ Internet → Caddy (port 8080) → Service routing by host/path
 - **OAuth**: Synthetic at our side
 - **⚠ Payment Pending caveat**: At time of build the Keepa subscription showed "Payment Pending" with 0 available tokens. The service deploys and `get_token_status` returns gracefully, but tool calls that require tokens will error until the subscription activates (€49/mo for 20 tokens/min).
 
+### ScrapingBee (port 8015)
+- **Purpose**: Live, point-in-time Amazon competitor content — product listings (price/buybox/A+/coupon), live SERP rank (organic vs sponsored), and inline review text + 5-star distribution. The "live competitor-content" layer alongside Keepa (history) and SP-API (own catalog).
+- **Auth**: `SCRAPINGBEE_API_KEY` env (1000 credits/mo on the free tier we're on; renewal date in `get_account_usage` response).
+- **Architecture**: Native FastMCP service. Direct httpx calls to `app.scrapingbee.com/api/v1/amazon/*` (Product, Search endpoints) plus `/api/v1/usage`. **No SDK dependency** — ScrapingBee's Python SDK is a thin wrapper, so we keep it minimal.
+- **Localization rule (verified)**: ScrapingBee REJECTS `country=us` + `domain=com` ("Invalid localization combination"). Use **`zip_code` for matching-country localization**, `country` only when routing from a non-matching country. `_build_localization()` enforces this; default US ZIP `30301` (Atlanta) keeps weekly competitor prices comparable.
+- **Credit costs (verified live)**:
+  - `/amazon/product`, `/amazon/search` light_request: 5 credits per page
+  - `/amazon/*` with light_request=false (full JS render): 15 credits
+  - General `/api/v1` (HTML API): 1 no-JS / 5 with-JS / 25 premium+JS / 75 stealth+JS
+  - AI extraction adds +5 credits
+  - `/usage` is free
+- **Credit budget guard**: `SCRAPINGBEE_CREDIT_BUDGET` env caps per-process spend; each tool response includes `credits_consumed_this_call` and `credits_consumed_this_process` so callers can track usage.
+- **MCP Tools (6)**:
+  - **Core**: `get_product(asin, country, zip_code, include_aplus)` snapshot — title/bullets/price/rating/buybox/BSR ladder; `get_offers(asin, ...)` buybox projection; `get_reviews(asin, ...)` — see deviation below; `search_keyword(keyword, sort_by, max_pages, ...)` — **organic vs sponsored always separated**, organic_rank integer on organic only
+  - **Discovery**: `get_bestsellers(keyword_or_category, ...)` — wraps search with sort=bestsellers
+  - **Ops**: `get_account_usage()` — free, surfaces remaining + per-process spend
+- **⚠ Reviews limitation (major spec deviation)**: The original spec called for 100+ reviews per ASIN via a "dedicated Review API." That doesn't exist (`/amazon/reviews` returns 404), AND the full `/product-reviews/{ASIN}` page on amazon.com requires login from any ScrapingBee proxy IP (confirmed with HTTP 500 + `"help": "Redirected to login"` on standard, premium, AND stealth proxies). **Pivot**: `get_reviews` returns the ~8 top reviews that Amazon surfaces inline on the product page (cheap — 5cr, reliable), plus `rating_stars_distribution`. For deeper review pulls, route via Oxylabs (different anti-bot model) or an authenticated SP-API session in v2.
+- **Defensive shape coercion**: ScrapingBee's product response returns `buybox` and `delivery` as either dict OR list depending on the ASIN. `_as_dict()` helper coerces both, preserving the raw subtree as `buybox_raw` / `delivery_raw` for callers that need full structure.
+- **Cache**: SQLite kv at `SCRAPINGBEE_CACHE_PATH` (default `/tmp/scrapingbee-cache.db`, TTL `SCRAPINGBEE_CACHE_TTL_SECONDS` default 7 days). Pure-JSON responses round-trip cleanly (no numpy headache like Keepa had).
+- **Compliance gut-check** (per spec): Treat scraped review/content data as internal CI for ad optimization — not for republication. Keep volumes reasonable.
+- **OAuth**: Synthetic at our side
+
 ## Routing (Caddyfile)
 
 Host-based routing takes priority (prevents cross-domain OAuth hijack):
@@ -207,9 +232,10 @@ Host-based routing takes priority (prevents cross-domain OAuth hijack):
 10. `uw.bibager.com` → 8012 (Unusual Whales proxy)
 11. `datarova.bibager.com` → 8013 (Amazon brand rank tracker)
 12. `keepa.bibager.com` → 8014 (Keepa historical data)
-13. GA OAuth endpoints (`/.well-known/*`, `/authorize`, `/token`, etc.) → 8002
-14. Path-based fallbacks: `/ga/*`, `/monarch/*`, `/todoist/*`, `/gitlab/*`, `/weather/*`, `/trackiq/*`, `/framer/*`, `/pacvue/*`, `/alpaca/*`, `/ta/*`, `/uw/*`, `/datarova/*`, `/keepa/*`
-15. Default: 404
+13. `scrapingbee.bibager.com` → 8015 (ScrapingBee Amazon content)
+14. GA OAuth endpoints (`/.well-known/*`, `/authorize`, `/token`, etc.) → 8002
+15. Path-based fallbacks: `/ga/*`, `/monarch/*`, `/todoist/*`, `/gitlab/*`, `/weather/*`, `/trackiq/*`, `/framer/*`, `/pacvue/*`, `/alpaca/*`, `/ta/*`, `/uw/*`, `/datarova/*`, `/keepa/*`, `/scrapingbee/*`
+16. Default: 404
 
 ## Environment Variables
 
@@ -245,6 +271,12 @@ Host-based routing takes priority (prevents cross-domain OAuth hijack):
 | `KEEPA_DEFAULT_DOMAIN` | Keepa | Optional; defaults to `US` (Keepa domainId 1) |
 | `KEEPA_CACHE_PATH` | Keepa | Optional SQLite cache path (default `/tmp/keepa-cache.db`; ephemeral on DO App Platform) |
 | `KEEPA_CACHE_TTL_SECONDS` | Keepa | Optional cache TTL in seconds (default 86400 = 24h) |
+| `SCRAPINGBEE_API_KEY` | ScrapingBee | API key from `app.scrapingbee.com/api-keys` |
+| `SCRAPINGBEE_DEFAULT_ZIP` | ScrapingBee | Optional; default `30301` (Atlanta — keeps US prices comparable week-over-week) |
+| `SCRAPINGBEE_DEFAULT_COUNTRY` | ScrapingBee | Optional; only set when routing from non-matching country |
+| `SCRAPINGBEE_CREDIT_BUDGET` | ScrapingBee | Optional soft per-process credit cap (default unlimited) |
+| `SCRAPINGBEE_CACHE_PATH` | ScrapingBee | Optional SQLite cache path (default `/tmp/scrapingbee-cache.db`; ephemeral on DO) |
+| `SCRAPINGBEE_CACHE_TTL_SECONDS` | ScrapingBee | Optional cache TTL (default 604800 = 7d) |
 | `SERVER_URL` | All | Per-service base URL override (e.g. `https://framer.bibager.com`) |
 
 ## Conventions
@@ -296,6 +328,7 @@ Daily 9:00am CST. Cron → Todoist (P1+P2) → format → Claude Haiku → Gmail
 - **Unusual Whales proxy** (May 2026): HTTP-streaming proxy to `api.unusualwhales.com/api/mcp` with Bearer rewrite. Surfaces options flow, dark pool, congressional trades, ETF holdings. Critical setup gotcha: the public-facing `unusualwhales.com/public-api/mcp` URL is the docs page, NOT the MCP endpoint — use `api.unusualwhales.com/api/mcp` upstream.
 - **Datarova rank tracker** (Jun 2026): Reverse-engineered Amazon brand keyword rank tracker (`app.datarova.com` has no public API). First service to do **server-side AWS Cognito refresh-token flow** — we hold a ~30-day refresh token in env and mint fresh access/id JWTs on demand instead of asking the user to recapture hourly. 11 tools across rank tracker, market data (Keyword Spy / ASIN Insights), product enrichment. Endpoint discovery powered by `tools/datarova-api-recon/` Chrome extension. Key finding: on Basic tier, ASIN Insights isn't a separate "list keywords for any ASIN" endpoint — it's `/records/record` iterated over your tracked keywords with the competitor as `topAsin`; the bulk-keywords feature is gated behind a PostHog flag.
 - **Keepa historical data** (Jun 2026): Amazon historical price / BSR / buy-box / rating time series + competitive discovery via the official `keepa` PyPI package. 12 tools. Heavy normalization at the wrapper layer (KeepaTime → ISO 8601, integer cents → decimal dollars, `-1` sentinel → null) so agents never see raw Keepa encodings. Lazy Keepa client init means the service deploys cleanly even when the subscription is "Payment Pending" (constructor pings the API). Simple SQLite kv cache at `/tmp/keepa-cache.db` saves tokens on repeated history pulls within a deploy — ephemeral on DO App Platform.
+- **ScrapingBee Amazon content** (Jun 2026): Live competitor content layer — product listings, SERP rank (organic vs sponsored), inline reviews. 6 tools. Pure-httpx wrapper around `/api/v1/amazon/{product,search}` plus `/api/v1/usage`. Two material spec deviations forced by ScrapingBee's actual API behavior: (1) `country=us` + `domain=com` is rejected — use `zip_code` for matching-country localization; (2) the spec's "dedicated Review API" doesn't exist (`/amazon/reviews` is 404) AND the full `/product-reviews/{ASIN}` page on Amazon requires login from any ScrapingBee proxy IP (confirmed across standard, premium, AND stealth tiers — all return HTTP 500 with `"Redirected to login"`). Pivot: `get_reviews` returns the ~8 reviews Amazon surfaces inline on the product page (5cr, reliable) plus `rating_stars_distribution`. Deep review pulls await an Oxylabs or SP-API integration in v2.
 
 ## Open follow-ups
 
