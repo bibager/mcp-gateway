@@ -844,6 +844,38 @@ def _status_dict(status_obj: Any) -> dict[str, Any]:
 
 
 @mcp.tool(
+    name="_debug_dump_product",
+    annotations={"readOnlyHint": True, "destructiveHint": False},
+)
+async def _debug_dump_product(asin: str, domain: str = "US") -> str:
+    """TEMPORARY DEBUG. Dumps the raw keepa product structure to diagnose
+    history-extraction issues. Will be removed once fix is verified."""
+    client = await _get_client()
+    products = await asyncio.to_thread(
+        client.query, asin, domain=domain, history=True, rating=True, wait=False
+    )
+    if not products:
+        return _json({"error": "no product returned"})
+    p = products[0]
+    data = p.get("data") or {}
+    return _json({
+        "top_level_keys": sorted(p.keys()),
+        "data_dict_type": str(type(data)),
+        "data_dict_keys": sorted(list(data.keys())) if hasattr(data, "keys") else None,
+        "csv_present": "csv" in p,
+        "csv_type": str(type(p.get("csv"))) if "csv" in p else None,
+        "csv_len": len(p.get("csv") or []),
+        "csv_first_5_indices_nonempty": [
+            (i, len(p.get("csv", [])[i]) if i < len(p.get("csv", [])) and p.get("csv", [])[i] is not None else 0)
+            for i in [0, 1, 2, 3, 16, 17, 18]
+        ] if p.get("csv") else None,
+        "sample_SALES": list(data.get("SALES", []))[:3] if data else None,
+        "sample_SALES_time": [str(t) for t in list(data.get("SALES_time", []))[:3]] if data else None,
+        "sample_AMAZON": list(data.get("AMAZON", []))[:3] if data else None,
+    })
+
+
+@mcp.tool(
     name="get_token_status",
     annotations={"readOnlyHint": True, "destructiveHint": False},
 )
