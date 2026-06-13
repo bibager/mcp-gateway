@@ -881,23 +881,47 @@ async def get_seller(seller_id: str, domain: str = "US") -> str:
 )
 async def search_products(term: str, domain: str = "US", per_page: int = 40) -> str:
     """
-    Search for ASINs matching a search term — keyword → matching products.
+    Map a keyword/phrase to matching ASINs.
+
+    Uses Keepa's /search REST endpoint directly. The keepa Python lib's
+    ``search_for_categories`` returns category nodes, which is a different
+    discovery path — use ``get_bestsellers(category_node)`` if you want
+    to drill into a category.
 
     Args:
         term: Search keyword or phrase.
         domain: Marketplace code, default 'US'.
-        per_page: Max results, default 40.
+        per_page: Max ASINs to return, default 40.
     """
-    client = await _get_client()
+    did = _domain_id(domain)
     try:
-        # keepa.search_for_categories returns category matches; for product
-        # search we want the product query with term param.
-        result = await asyncio.to_thread(
-            client.search_for_categories, term, domain=domain, wait=False
-        )
+        async with httpx.AsyncClient(timeout=30.0) as http:
+            r = await http.get(
+                "https://api.keepa.com/search",
+                params={
+                    "key": KEEPA_API_KEY,
+                    "domain": did,
+                    "type": "product",
+                    "term": term,
+                },
+            )
+        if r.status_code != 200:
+            raise RuntimeError(
+                f"Keepa /search returned HTTP {r.status_code}: {r.text[:300]}"
+            )
+        body = r.json()
     except Exception as e:
         raise RuntimeError(_format_keepa_error(e)) from e
-    return _json({"term": term, "domain": domain, "result": result})
+
+    products = body.get("products") or []
+    asins = [p.get("asin") for p in products if p.get("asin")][:per_page]
+    return _json({
+        "term": term,
+        "domain": domain,
+        "count": len(asins),
+        "asins": asins,
+        "tokens_left": body.get("tokensLeft"),
+    })
 
 
 # --- Operations --------------------------------------------------------------
