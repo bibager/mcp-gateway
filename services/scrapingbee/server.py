@@ -649,12 +649,14 @@ async def get_reviews(
     Args:
         asin: 10-character Amazon ASIN.
         max_reviews: Upper bound on returned reviews (default 30, cap 100).
-            Each page yields ~10 reviews and costs ~10 credits.
+            Each page yields ~10 reviews.
         sort: 'most_recent' (default) or 'helpful'.
         country: Marketplace code, default 'us'.
 
-    Credit cost: ~10 credits per page fetched (5 for JS-rendered HTML
-    + 5 for AI extraction). 30 reviews ≈ 30 credits.
+    Credit cost: ~30 credits per page (25 premium-proxy + JS + 5 AI
+    extraction). Amazon aggressively bot-detects the reviews page; the
+    standard JS-render request gets 500-blocked, so premium_proxy is
+    mandatory. 30 reviews ≈ 90 credits; 100 reviews ≈ 300 credits.
     """
     max_reviews = max(1, min(int(max_reviews), 100))
     sort_param = {"most_recent": "recent", "helpful": "helpful"}.get(sort.lower())
@@ -662,9 +664,14 @@ async def get_reviews(
         raise ValueError("sort must be 'most_recent' or 'helpful'")
 
     domain = _amazon_domain(country)
-    # Each page is up to 10 reviews
+    # Each page is up to 10 reviews. Amazon's reviews page bot-detection
+    # blocks standard JS-render requests — ScrapingBee 500s with explicit
+    # guidance to use premium_proxy=true. That bumps per-page cost from 5
+    # (JS only) to 25 (premium+JS); add the +5 AI extraction surcharge for
+    # a real per-page cost of ~30 credits. Document in docstring.
+    PER_PAGE_COST = 30
     pages_needed = (max_reviews + 9) // 10
-    estimated_cost = pages_needed * 10
+    estimated_cost = pages_needed * PER_PAGE_COST
     _check_budget(estimated_cost)
 
     collected: list[dict] = []
@@ -697,21 +704,22 @@ async def get_reviews(
         )
         params: dict[str, Any] = {
             "url": review_url,
+            "premium_proxy": "true",          # required for Amazon reviews
             "render_js": "true",
             "ai_extract_rules": json.dumps(rules),
             "country_code": "us",
         }
-        status, body = await _sb_get("/", params, timeout=120.0)
+        status, body = await _sb_get("/", params, timeout=180.0)
         if status != 200:
             return _json({
                 "asin": asin,
                 "error": f"AI extraction HTTP {status} on page {page}: {str(body)[:300]}",
                 "reviews_collected": len(collected),
                 "reviews": collected,
-                "credits_consumed_this_call": (page - 1) * 10,
+                "credits_consumed_this_call": (page - 1) * PER_PAGE_COST,
                 "credits_consumed_this_process": _credits_spent_this_run,
             })
-        _record_spend(10)
+        _record_spend(PER_PAGE_COST)
 
         page_reviews = body.get("reviews") if isinstance(body, dict) else None
         if not page_reviews:
