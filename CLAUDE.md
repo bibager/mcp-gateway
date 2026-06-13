@@ -187,9 +187,10 @@ Internet → Caddy (port 8080) → Service routing by host/path
 - **Architecture**: Native FastMCP service. Built on the `keepa` PyPI package — never hand-roll the KeepaTime conversion, CSV-history index map, or token management since the lib already abstracts them. Sync Keepa API wrapped in `asyncio.to_thread`. Lazy client init so the service starts cleanly even when the subscription is "Payment Pending" (constructor pings the API).
 - **Normalization (mandatory)**: All timestamps → ISO 8601 UTC; all prices → decimal dollars from integer cents; all `-1` values → null (Keepa's "no data / out of stock" sentinel). Agents NEVER see raw Keepa encodings.
 - **Cache**: Simple SQLite kv store at `KEEPA_CACHE_PATH` (default `/tmp/keepa-cache.db`, TTL via `KEEPA_CACHE_TTL_SECONDS`, default 24h). Saves tokens on repeated history pulls within a single deploy. **Ephemeral on DO App Platform** — resets across deploys; persist responses externally if a durable historical baseline is needed.
-- **MCP Tools (12)**:
-  - **Core / history**: `get_product_snapshot(asins, domain)` — token-light current state batch (≤100 ASINs); `get_price_history(asin, price_type, start?, end?, domain)` where `price_type ∈ {amazon, new, used, buybox, fbm, fba, list_price}`; `get_sales_rank_history(asin, start?, end?, domain)` with category_node; `get_buybox_history(asin, start?, end?, domain)` price + seller (needs offers, more tokens); `get_rating_history(asin, start?, end?, domain)`; `get_product_stats(asins, days=90, domain)` cheap interval summary across many ASINs
+- **MCP Tools (14)**:
+  - **Core / history**: `get_product_snapshot(asins, domain)` — token-light current state batch (≤100 ASINs); `get_price_history(asin, price_type, start?, end?, domain)` where `price_type ∈ {amazon, new, used, buybox, fbm, fba, list_price, warehouse, collectible, refurbished, lightning_deal}`; `get_sales_rank_history(asin, start?, end?, domain)` with category_node; `get_buybox_history(asin, start?, end?, domain)` price + seller (needs offers, more tokens); `get_rating_history(asin, start?, end?, domain)`; `get_product_stats(asins, days=90, domain)` cheap interval summary across many ASINs
   - **Discovery**: `find_products(filters, domain, per_page)`; `get_bestsellers(category_node, domain)`; `get_deals(filters, domain)` promo monitoring; `get_seller(seller_id, domain)`; `search_products(term, domain, per_page)`
+  - **Catalog**: `get_variations(asin, domain)` — parent/child ASIN tree; `lookup_category(category_id, domain)` — decode BSR-ladder node IDs
   - **Ops**: `get_token_status()` — balance, refill rate, time-to-refill, subscription expiry
 - **Domain mapping**: US=1 (default), UK=2, DE=3, FR=4, JP=5, CA=6, CN=7, IT=8, ES=9, IN=10, MX=11, BR=12, AU=13. Default US per the Manuka Doctor US Seller account; only US validated for v1.
 - **OAuth**: Synthetic at our side
@@ -207,15 +208,31 @@ Internet → Caddy (port 8080) → Service routing by host/path
   - AI extraction adds +5 credits
   - `/usage` is free
 - **Credit budget guard**: `SCRAPINGBEE_CREDIT_BUDGET` env caps per-process spend; each tool response includes `credits_consumed_this_call` and `credits_consumed_this_process` so callers can track usage.
-- **MCP Tools (6)**:
-  - **Core**: `get_product(asin, country, zip_code, include_aplus)` snapshot — title/bullets/price/rating/buybox/BSR ladder; `get_offers(asin, ...)` buybox projection; `get_reviews(asin, ...)` — see deviation below; `search_keyword(keyword, sort_by, max_pages, ...)` — **organic vs sponsored always separated**, organic_rank integer on organic only
-  - **Discovery**: `get_bestsellers(keyword_or_category, ...)` — wraps search with sort=bestsellers
+- **MCP Tools (9)**:
+  - **Amazon core**: `get_product(asin, country, zip_code, include_aplus)` snapshot — title/bullets/price/rating/buybox/BSR ladder; `get_offers(asin, ...)` buybox projection; `get_reviews(asin, ...)` — see deviation below; `search_keyword(keyword, sort_by, max_pages, ...)` — **organic vs sponsored always separated**, organic_rank integer on organic only
+  - **Amazon discovery**: `get_bestsellers(keyword_or_category, ...)` — wraps search with sort=bestsellers
+  - **Generic web (off-Amazon intel)**: `scrape_url(url, render_js, premium_proxy, ai_query?, return_format)` — any URL, optional ai_query for NL extraction; `get_screenshot(url, full_page)` — base64 PNG capture; `search_google(query, search_type, country, date_range?)` — SERP via /store/google: organic + ads + AI overviews + knowledge graph + "people also ask"
   - **Ops**: `get_account_usage()` — free, surfaces remaining + per-process spend
 - **⚠ Reviews limitation (major spec deviation)**: The original spec called for 100+ reviews per ASIN via a "dedicated Review API." That doesn't exist (`/amazon/reviews` returns 404), AND the full `/product-reviews/{ASIN}` page on amazon.com requires login from any ScrapingBee proxy IP (confirmed with HTTP 500 + `"help": "Redirected to login"` on standard, premium, AND stealth proxies). **Pivot**: `get_reviews` returns the ~8 top reviews that Amazon surfaces inline on the product page (cheap — 5cr, reliable), plus `rating_stars_distribution`. For deeper review pulls, route via Oxylabs (different anti-bot model) or an authenticated SP-API session in v2.
 - **Defensive shape coercion**: ScrapingBee's product response returns `buybox` and `delivery` as either dict OR list depending on the ASIN. `_as_dict()` helper coerces both, preserving the raw subtree as `buybox_raw` / `delivery_raw` for callers that need full structure.
 - **Cache**: SQLite kv at `SCRAPINGBEE_CACHE_PATH` (default `/tmp/scrapingbee-cache.db`, TTL `SCRAPINGBEE_CACHE_TTL_SECONDS` default 7 days). Pure-JSON responses round-trip cleanly (no numpy headache like Keepa had).
 - **Compliance gut-check** (per spec): Treat scraped review/content data as internal CI for ad optimization — not for republication. Keep volumes reasonable.
 - **OAuth**: Synthetic at our side
+
+### Oxylabs (port 8016)
+- **Purpose**: The Oxylabs arm of the A/B test against ScrapingBee — drop-in swappable tool surface for comparing the two providers on identical inputs. Same headline use cases: live Amazon competitor content, SERP rank, reviews, off-Amazon web intel.
+- **Auth**: HTTP Basic with `OXYLABS_USERNAME:OXYLABS_PASSWORD` (note: NOT an API key — different from ScrapingBee).
+- **Architecture**: Native FastMCP. Direct httpx POST to `https://realtime.oxylabs.io/v1/queries` with `parse=true` unconditionally (Oxylabs' structured-JSON parser is the main reason to prefer them). Synchronous endpoint — interactive single-ASIN calls land in 4-7s.
+- **Geo pinning**: Default `OXYLABS_DEFAULT_GEO=30301` (Atlanta) matching ScrapingBee for week-over-week price comparability.
+- **Source-availability on this tier** (verified by probe on trackiq_5OWSJ): **Available** — `amazon_product`, `amazon_search`, `amazon_pricing`, `amazon_sellers`, `amazon_bestsellers`, `google_search`, `universal` (any URL). **Tier-gated** — `amazon_reviews`, `amazon_questions`.
+- **MCP Tools (10)**:
+  - **Amazon parity** (same shape as ScrapingBee for drop-in A/B): `get_product`, `get_offers`, `search_keyword`, `get_bestsellers`, `get_reviews` (inline-from-product pivot, same as ScrapingBee), `get_account_usage` (per-process counter — Oxylabs has no public usage endpoint; check dashboard)
+  - **Amazon bonus**: `get_seller(seller_id)` — `amazon_sellers` source
+  - **Generic web (off-Amazon intel, parity with ScrapingBee)**: `scrape_url(url, render, parse, geo_location)` via `universal` source; `search_google(query, geo_location, pages, sort_by)` via `google_search` source — returns organic / paid / ai_overviews / related_searches / people_also_ask
+- **Where Oxylabs wins shape-wise**: SERP organic/paid/`amazons_choices` are PRE-SEPARATED by the parser (no manual sponsored detection); dedicated `amazon_pricing` source (vs ScrapingBee projecting from product); dedicated `amazon_bestsellers` source (vs ScrapingBee wrapping search). Bonus product fields surfaced under `_oxylabs_bonus`: `buy_it_with`, `frequently_bought_together`, `price_per_unit`.
+- **Cost model**: Pay-per-successful-result (no JS-render multiplier). `OXYLABS_RESULT_BUDGET` enforces per-process cap.
+- **OAuth**: Synthetic at our side
+- **⚠ Reviews same-ceiling as ScrapingBee**: Both providers cap at ~8 inline reviews per ASIN on trial tiers — ScrapingBee blocked by Amazon's login wall, Oxylabs tier-gated on `amazon_reviews`. The spec's "100+" target needs Oxylabs plan upgrade OR authenticated SP-API.
 
 ## Routing (Caddyfile)
 
@@ -233,9 +250,10 @@ Host-based routing takes priority (prevents cross-domain OAuth hijack):
 11. `datarova.bibager.com` → 8013 (Amazon brand rank tracker)
 12. `keepa.bibager.com` → 8014 (Keepa historical data)
 13. `scrapingbee.bibager.com` → 8015 (ScrapingBee Amazon content)
-14. GA OAuth endpoints (`/.well-known/*`, `/authorize`, `/token`, etc.) → 8002
-15. Path-based fallbacks: `/ga/*`, `/monarch/*`, `/todoist/*`, `/gitlab/*`, `/weather/*`, `/trackiq/*`, `/framer/*`, `/pacvue/*`, `/alpaca/*`, `/ta/*`, `/uw/*`, `/datarova/*`, `/keepa/*`, `/scrapingbee/*`
-16. Default: 404
+14. `oxylabs.bibager.com` → 8016 (Oxylabs Amazon Web Scraper API)
+15. GA OAuth endpoints (`/.well-known/*`, `/authorize`, `/token`, etc.) → 8002
+16. Path-based fallbacks: `/ga/*`, `/monarch/*`, `/todoist/*`, `/gitlab/*`, `/weather/*`, `/trackiq/*`, `/framer/*`, `/pacvue/*`, `/alpaca/*`, `/ta/*`, `/uw/*`, `/datarova/*`, `/keepa/*`, `/scrapingbee/*`, `/oxylabs/*`
+17. Default: 404
 
 ## Environment Variables
 
@@ -277,6 +295,13 @@ Host-based routing takes priority (prevents cross-domain OAuth hijack):
 | `SCRAPINGBEE_CREDIT_BUDGET` | ScrapingBee | Optional soft per-process credit cap (default unlimited) |
 | `SCRAPINGBEE_CACHE_PATH` | ScrapingBee | Optional SQLite cache path (default `/tmp/scrapingbee-cache.db`; ephemeral on DO) |
 | `SCRAPINGBEE_CACHE_TTL_SECONDS` | ScrapingBee | Optional cache TTL (default 604800 = 7d) |
+| `OXYLABS_USERNAME` | Oxylabs | API username (NOT an API key; HTTP Basic auth) |
+| `OXYLABS_PASSWORD` | Oxylabs | API password |
+| `OXYLABS_DEFAULT_DOMAIN` | Oxylabs | Optional; default `com` (US) |
+| `OXYLABS_DEFAULT_GEO` | Oxylabs | Optional; default `30301` (Atlanta — matches ScrapingBee for parity) |
+| `OXYLABS_RESULT_BUDGET` | Oxylabs | Optional soft per-process result cap |
+| `OXYLABS_CACHE_PATH` | Oxylabs | Optional SQLite cache path (default `/tmp/oxylabs-cache.db`) |
+| `OXYLABS_CACHE_TTL_SECONDS` | Oxylabs | Optional cache TTL (default 604800 = 7d) |
 | `SERVER_URL` | All | Per-service base URL override (e.g. `https://framer.bibager.com`) |
 
 ## Conventions
@@ -291,7 +316,7 @@ Host-based routing takes priority (prevents cross-domain OAuth hijack):
 ## Deployment
 
 - **Platform**: DigitalOcean App Platform (app id `02a49797-290a-42fa-b71c-2d5dbe4fe107`)
-- **Instance**: `apps-s-1vcpu-1gb` (~$12/mo) — has headroom for all 11 services
+- **Instance**: `apps-s-1vcpu-2gb` (~$24/mo) — bumped from 1GB on 2026-06-13 after the 1GB instance hit a resource ceiling adding the 14th service (Oxylabs). Caddy's `/health` probe timed out during the simultaneous-startup race on 1GB; the 2GB upgrade resolved it cleanly and leaves room for further additions.
 - **Git**: Deploys from `origin/main` on push. Local work happens on `master`; push to main with `git push origin master:main`.
 - **CLI**: `doctl` is available and authenticated for spec updates and log inspection.
 - **DNS**: Each subdomain has a Cloudflare CNAME (DNS-only, gray cloud) pointing at `mcp-gateway-pph44.ondigitalocean.app`. Add a new subdomain by (1) registering it as an `ALIAS` domain on the DO app, (2) adding the CNAME in Cloudflare.
@@ -329,6 +354,8 @@ Daily 9:00am CST. Cron → Todoist (P1+P2) → format → Claude Haiku → Gmail
 - **Datarova rank tracker** (Jun 2026): Reverse-engineered Amazon brand keyword rank tracker (`app.datarova.com` has no public API). First service to do **server-side AWS Cognito refresh-token flow** — we hold a ~30-day refresh token in env and mint fresh access/id JWTs on demand instead of asking the user to recapture hourly. 11 tools across rank tracker, market data (Keyword Spy / ASIN Insights), product enrichment. Endpoint discovery powered by `tools/datarova-api-recon/` Chrome extension. Key finding: on Basic tier, ASIN Insights isn't a separate "list keywords for any ASIN" endpoint — it's `/records/record` iterated over your tracked keywords with the competitor as `topAsin`; the bulk-keywords feature is gated behind a PostHog flag.
 - **Keepa historical data** (Jun 2026): Amazon historical price / BSR / buy-box / rating time series + competitive discovery via the official `keepa` PyPI package. 12 tools. Heavy normalization at the wrapper layer (KeepaTime → ISO 8601, integer cents → decimal dollars, `-1` sentinel → null) so agents never see raw Keepa encodings. Lazy Keepa client init means the service deploys cleanly even when the subscription is "Payment Pending" (constructor pings the API). Simple SQLite kv cache at `/tmp/keepa-cache.db` saves tokens on repeated history pulls within a deploy — ephemeral on DO App Platform.
 - **ScrapingBee Amazon content** (Jun 2026): Live competitor content layer — product listings, SERP rank (organic vs sponsored), inline reviews. 6 tools. Pure-httpx wrapper around `/api/v1/amazon/{product,search}` plus `/api/v1/usage`. Two material spec deviations forced by ScrapingBee's actual API behavior: (1) `country=us` + `domain=com` is rejected — use `zip_code` for matching-country localization; (2) the spec's "dedicated Review API" doesn't exist (`/amazon/reviews` is 404) AND the full `/product-reviews/{ASIN}` page on Amazon requires login from any ScrapingBee proxy IP (confirmed across standard, premium, AND stealth tiers — all return HTTP 500 with `"Redirected to login"`). Pivot: `get_reviews` returns the ~8 reviews Amazon surfaces inline on the product page (5cr, reliable) plus `rating_stars_distribution`. Deep review pulls await an Oxylabs or SP-API integration in v2.
+- **Oxylabs A/B parity** (Jun 2026): The Oxylabs arm of the head-to-head against ScrapingBee. 10 tools — 6 parity (drop-in swappable output shape), 1 bonus (`get_seller`), 2 generic-web (`scrape_url` via `universal`, `search_google`), 1 ops. Pure-httpx POST to `/v1/queries` with HTTP Basic, `parse=true` always. Major split-test finding: BOTH providers cap at ~8 inline reviews on the trial tiers — ScrapingBee blocked by Amazon's login wall, Oxylabs tier-gated on `amazon_reviews` source. So the head-to-head decides on cost/latency/field-completeness/SERP-accuracy, NOT review depth. Where Oxylabs wins shape-wise: SERP organic/paid/`amazons_choices` pre-separated by the parser; dedicated `amazon_pricing` and `amazon_bestsellers` sources (vs ScrapingBee's reuse-of-product and wrap-around-search). Adding this service is what pushed us past the 1GB instance ceiling — bumped to 2GB.
+- **Deep-dive tool additions** (Jun 2026): After the three Amazon-content services were live, researched each provider's full API surface and added 7 tools targeting gaps. Keepa: `get_variations` (parent/child ASIN tree), `lookup_category` (BSR-ladder decode), plus 4 new `get_price_history` series (`warehouse`, `collectible`, `refurbished`, `lightning_deal`). ScrapingBee: `scrape_url` (any URL with optional ai_query), `get_screenshot` (base64 PNG), `search_google` (Google SERP via `/store/google` — organic + ads + AI overviews + knowledge graph + "people also ask"). Oxylabs: `scrape_url` via `universal` source, `search_google` via `google_search` source (parity with ScrapingBee for the A/B test). Capability unlocked: off-Amazon competitive intel (brand mentions, blog/news monitoring, visual listing comparison) without leaving the gateway.
 
 ## Open follow-ups
 
