@@ -124,20 +124,38 @@ def _rating(v: Any) -> Optional[float]:
 
 
 def _to_iso(t: Any) -> Optional[str]:
-    """Normalize any time-ish value to ISO 8601 UTC string."""
+    """Normalize any time-ish value to ISO 8601 UTC string.
+
+    Handles: datetime.datetime, numpy.datetime64, pandas Timestamp, ISO-formatted
+    str (already-converted, e.g. round-tripped through cache), and Keepa-minutes ints.
+    """
     if t is None:
         return None
     if isinstance(t, dt.datetime):
         if t.tzinfo is None:
             t = t.replace(tzinfo=dt.timezone.utc)
         return t.astimezone(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    # numpy datetime64
+    # str input (ISO already, or numpy str form like "2019-01-16 22:56:00")
+    if isinstance(t, str):
+        for fmt in ("%Y-%m-%dT%H:%M:%SZ", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S"):
+            try:
+                d = dt.datetime.strptime(t, fmt).replace(tzinfo=dt.timezone.utc)
+                return d.strftime("%Y-%m-%dT%H:%M:%SZ")
+            except ValueError:
+                continue
+        return None
+    # numpy datetime64 / pandas Timestamp
     if hasattr(t, "astype"):
         try:
             secs = t.astype("datetime64[s]").astype(int)
             return dt.datetime.fromtimestamp(int(secs), tz=dt.timezone.utc).strftime(
                 "%Y-%m-%dT%H:%M:%SZ"
             )
+        except Exception:
+            pass
+    if hasattr(t, "isoformat"):
+        try:
+            return _to_iso(t.to_pydatetime() if hasattr(t, "to_pydatetime") else t.isoformat())
         except Exception:
             pass
     # keepa minutes int fallback
@@ -147,6 +165,51 @@ def _to_iso(t: Any) -> Optional[str]:
         ).strftime("%Y-%m-%dT%H:%M:%SZ")
     except Exception:
         return None
+
+
+def _parsed_price(v: Any) -> Optional[float]:
+    """Value already-parsed by keepa.parse_csv — dollars float with NaN for missing."""
+    if v is None:
+        return None
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return None
+    if f != f:  # NaN
+        return None
+    if f < 0:  # also guard against -1 leakage
+        return None
+    return round(f, 2)
+
+
+def _parsed_count(v: Any) -> Optional[int]:
+    """Value already-parsed by keepa.parse_csv — int with -1 or NaN for missing.
+
+    Used for BSR (SALES) and review counts.
+    """
+    if v is None:
+        return None
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return None
+    if f != f:  # NaN
+        return None
+    iv = int(f)
+    return None if iv == -1 else iv
+
+
+def _parsed_rating(v: Any) -> Optional[float]:
+    """Rating already-parsed by keepa — 4.7 directly (NOT 47), NaN for missing."""
+    if v is None:
+        return None
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return None
+    if f != f or f < 0:
+        return None
+    return round(f, 1)
 
 
 def _parse_date_param(s: Optional[str]) -> Optional[dt.datetime]:
@@ -429,8 +492,8 @@ async def get_price_history(
 
     product = await _fetch_product_history(asin, domain, want_offers=(key == "buybox"))
     data = product.get("data") or {}
-    times = data.get(f"{series}_time") or []
-    values = data.get(series) or []
+    times = list(data.get(f"{series}_time") or [])
+    values = list(data.get(series) or [])
     if len(times) == 0 or len(values) == 0:
         return _json({
             "asin": asin,
@@ -440,7 +503,7 @@ async def get_price_history(
             "note": f"No data for series {series}. Series may not be populated for this ASIN.",
         })
     pts = _filter_series(
-        list(times), list(values), _cents_to_dollars,
+        times, values, _parsed_price,
         _parse_date_param(start), _parse_date_param(end),
     )
     return _json({
@@ -477,11 +540,11 @@ async def get_sales_rank_history(
     """
     product = await _fetch_product_history(asin, domain)
     data = product.get("data") or {}
-    times = data.get("SALES_time") or []
-    values = data.get("SALES") or []
+    times = list(data.get("SALES_time") or [])
+    values = list(data.get("SALES") or [])
     cat_tree = product.get("categoryTree") or []
     pts = _filter_series(
-        list(times), list(values), _raw_int,
+        times, values, _parsed_count,
         _parse_date_param(start), _parse_date_param(end),
     )
     return _json({
@@ -518,12 +581,12 @@ async def get_buybox_history(
     """
     product = await _fetch_product_history(asin, domain, want_offers=True)
     data = product.get("data") or {}
-    times = data.get("BUY_BOX_SHIPPING_time") or []
-    prices = data.get("BUY_BOX_SHIPPING") or []
+    times = list(data.get("BUY_BOX_SHIPPING_time") or [])
+    prices = list(data.get("BUY_BOX_SHIPPING") or [])
     seller_hist = product.get("buyBoxSellerIdHistory") or []
 
     price_pts = _filter_series(
-        list(times), list(prices), _cents_to_dollars,
+        times, prices, _parsed_price,
         _parse_date_param(start), _parse_date_param(end),
     )
 
@@ -571,17 +634,17 @@ async def get_rating_history(
     product = await _fetch_product_history(asin, domain, want_rating=True)
     data = product.get("data") or {}
 
-    rating_times = data.get("RATING_time") or []
-    rating_vals = data.get("RATING") or []
-    count_times = data.get("COUNT_REVIEWS_time") or []
-    count_vals = data.get("COUNT_REVIEWS") or []
+    rating_times = list(data.get("RATING_time") or [])
+    rating_vals = list(data.get("RATING") or [])
+    count_times = list(data.get("COUNT_REVIEWS_time") or [])
+    count_vals = list(data.get("COUNT_REVIEWS") or [])
 
     rating_pts = _filter_series(
-        list(rating_times), list(rating_vals), _rating,
+        rating_times, rating_vals, _parsed_rating,
         _parse_date_param(start), _parse_date_param(end),
     )
     review_pts = _filter_series(
-        list(count_times), list(count_vals), _raw_int,
+        count_times, count_vals, _parsed_count,
         _parse_date_param(start), _parse_date_param(end),
     )
 
@@ -844,38 +907,6 @@ def _status_dict(status_obj: Any) -> dict[str, Any]:
 
 
 @mcp.tool(
-    name="_debug_dump_product",
-    annotations={"readOnlyHint": True, "destructiveHint": False},
-)
-async def _debug_dump_product(asin: str, domain: str = "US") -> str:
-    """TEMPORARY DEBUG. Dumps the raw keepa product structure to diagnose
-    history-extraction issues. Will be removed once fix is verified."""
-    client = await _get_client()
-    products = await asyncio.to_thread(
-        client.query, asin, domain=domain, history=True, rating=True, wait=False
-    )
-    if not products:
-        return _json({"error": "no product returned"})
-    p = products[0]
-    data = p.get("data") or {}
-    return _json({
-        "top_level_keys": sorted(p.keys()),
-        "data_dict_type": str(type(data)),
-        "data_dict_keys": sorted(list(data.keys())) if hasattr(data, "keys") else None,
-        "csv_present": "csv" in p,
-        "csv_type": str(type(p.get("csv"))) if "csv" in p else None,
-        "csv_len": len(p.get("csv") or []),
-        "csv_first_5_indices_nonempty": [
-            (i, len(p.get("csv", [])[i]) if i < len(p.get("csv", [])) and p.get("csv", [])[i] is not None else 0)
-            for i in [0, 1, 2, 3, 16, 17, 18]
-        ] if p.get("csv") else None,
-        "sample_SALES": list(data.get("SALES", []))[:3] if data else None,
-        "sample_SALES_time": [str(t) for t in list(data.get("SALES_time", []))[:3]] if data else None,
-        "sample_AMAZON": list(data.get("AMAZON", []))[:3] if data else None,
-    })
-
-
-@mcp.tool(
     name="get_token_status",
     annotations={"readOnlyHint": True, "destructiveHint": False},
 )
@@ -921,17 +952,15 @@ async def _fetch_product_history(
     want_offers: bool = False,
     want_rating: bool = True,
 ) -> dict:
-    """Fetch a single Keepa product with history parsed, using SQLite cache.
+    """Fetch a single Keepa product with history parsed (no caching).
 
-    Cache key includes (asin, domain, offers, rating) so we don't return
-    offers-less data when offers were requested.
+    The earlier cache layer was removed: it had to JSONify numpy arrays for
+    storage, which corrupted the parsed-time/parsed-value shape that
+    ``keepa.parse_csv`` produces and broke every downstream history tool.
+    For v1 we re-fetch on each call — Keepa's per-product history cost is
+    low enough that this is acceptable; revisit with a typed parquet cache
+    if a workload demands it.
     """
-    key = _cache_key("product_history", asin, _domain_id(domain),
-                     int(want_offers), int(want_rating))
-    cached = cache_get(key)
-    if cached is not None:
-        return cached
-
     client = await _get_client()
     kwargs: dict[str, Any] = {
         "domain": domain,
@@ -942,46 +971,13 @@ async def _fetch_product_history(
     if want_offers:
         kwargs["offers"] = 20
         kwargs["buybox"] = True
-
     try:
         products = await asyncio.to_thread(client.query, asin, **kwargs)
     except Exception as e:
         raise RuntimeError(_format_keepa_error(e)) from e
-
     if not products:
         raise RuntimeError(f"No product returned for ASIN {asin!r}")
-    product = products[0]
-
-    # The keepa lib returns numpy arrays inside 'data'; JSONify them to
-    # cache-safe types. We re-key under string-isos for time arrays and
-    # plain int/float lists for values.
-    safe = _to_cache_safe(product)
-    cache_set(key, safe)
-    return safe
-
-
-def _to_cache_safe(product: dict) -> dict:
-    """Strip numpy / datetime types from a keepa product dict so it JSON-serializes."""
-    out = {}
-    for k, v in product.items():
-        if k == "data":
-            data_out: dict[str, list] = {}
-            for series, arr in (v or {}).items():
-                if hasattr(arr, "tolist"):
-                    arr = arr.tolist()
-                if isinstance(arr, list) and arr and isinstance(arr[0], dt.datetime):
-                    arr = [_to_iso(t) for t in arr]
-                data_out[series] = arr
-            out[k] = data_out
-        elif hasattr(v, "tolist"):
-            out[k] = v.tolist()
-        else:
-            try:
-                json.dumps(v)
-                out[k] = v
-            except TypeError:
-                out[k] = str(v)
-    return out
+    return products[0]
 
 
 # --- OAuth 2.0 with PKCE (synthetic — issues MCP_API_KEY as access_token) ---
