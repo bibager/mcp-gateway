@@ -635,127 +635,81 @@ async def get_bestsellers(
 )
 async def get_reviews(
     asin: str,
-    max_reviews: int = 30,
-    sort: str = "most_recent",
     country: str = "us",
+    zip_code: Optional[str] = None,
 ) -> str:
     """
-    Pull review text + metadata for an ASIN — the headline tool.
+    Pull review text + metadata + 5-star distribution for an ASIN.
 
-    ScrapingBee has NO dedicated /amazon/reviews endpoint (confirmed via
-    probe), so this uses the general HTML API + ai_extract_rules to
-    parse the public Amazon reviews page.
+    Returns the ~8 "top reviews" that Amazon surfaces inline on the
+    product page (typically highest-helpful-vote across all stars).
+    Plenty for sentiment / theme analysis on a single ASIN; for broader
+    coverage, call across your competitive set and aggregate.
+
+    Why only 8 instead of the spec's 100+:
+      Amazon's full /product-reviews/{ASIN} page requires login from any
+      ScrapingBee proxy IP (confirmed: HTTP 500 with "Redirected to
+      login" even on premium_proxy AND stealth_proxy). The reliable,
+      cheap path is to surface the reviews already returned inline by
+      /amazon/product. If you need deep review pulls, that's a future
+      Oxylabs / authenticated-session integration.
 
     Args:
         asin: 10-character Amazon ASIN.
-        max_reviews: Upper bound on returned reviews (default 30, cap 100).
-            Each page yields ~10 reviews.
-        sort: 'most_recent' (default) or 'helpful'.
         country: Marketplace code, default 'us'.
+        zip_code: Optional ZIP for US localization (defaults to
+            SCRAPINGBEE_DEFAULT_ZIP).
 
-    Credit cost: ~30 credits per page (25 premium-proxy + JS + 5 AI
-    extraction). Amazon aggressively bot-detects the reviews page; the
-    standard JS-render request gets 500-blocked, so premium_proxy is
-    mandatory. 30 reviews ≈ 90 credits; 100 reviews ≈ 300 credits.
+    Credit cost: 5. (Same call as get_product — agents can call this
+    OR get_product depending on what they need.)
     """
-    max_reviews = max(1, min(int(max_reviews), 100))
-    sort_param = {"most_recent": "recent", "helpful": "helpful"}.get(sort.lower())
-    if not sort_param:
-        raise ValueError("sort must be 'most_recent' or 'helpful'")
-
-    domain = _amazon_domain(country)
-    # Each page is up to 10 reviews. Amazon's reviews page bot-detection
-    # blocks standard JS-render requests — ScrapingBee 500s with explicit
-    # guidance to use premium_proxy=true. That bumps per-page cost from 5
-    # (JS only) to 25 (premium+JS); add the +5 AI extraction surcharge for
-    # a real per-page cost of ~30 credits. Document in docstring.
-    PER_PAGE_COST = 30
-    pages_needed = (max_reviews + 9) // 10
-    estimated_cost = pages_needed * PER_PAGE_COST
-    _check_budget(estimated_cost)
-
-    collected: list[dict] = []
-    seen_ids: set[str] = set()
-    rules = {
-        "reviews": {
-            "type": "list",
-            "description": (
-                "All customer reviews on this page. Skip 'top reviews from other "
-                "countries' if present unless they're the only reviews shown."
-            ),
-            "output": {
-                "rating": "review star rating, integer 1-5",
-                "title": "review title text",
-                "body": "review body text with HTML stripped",
-                "date": "review date in ISO format YYYY-MM-DD",
-                "country": "country the review was posted from",
-                "verified_purchase": "boolean, true if Verified Purchase badge present",
-                "helpful_votes": "integer count of helpful votes, or 0 if none",
-                "variant": "variant or style of the product reviewed, if shown",
-                "reviewer_name": "reviewer display name",
-            },
-        },
-    }
-
-    for page in range(1, pages_needed + 1):
-        review_url = (
-            f"https://www.amazon.{domain}/product-reviews/{asin}"
-            f"?pageNumber={page}&sortBy={sort_param}&reviewerType=all_reviews"
+    _check_budget(5)
+    loc = _build_localization(country, zip_code)
+    params: dict[str, Any] = {"query": asin, **loc}
+    status, body = await _sb_get("/amazon/product", params, timeout=90.0)
+    if status != 200:
+        raise RuntimeError(
+            f"ScrapingBee /amazon/product HTTP {status} for ASIN {asin}: {str(body)[:300]}"
         )
-        params: dict[str, Any] = {
-            "url": review_url,
-            "premium_proxy": "true",          # required for Amazon reviews
-            "render_js": "true",
-            "block_resources": "false",       # ScrapingBee's reviews-page guidance
-            "ai_extract_rules": json.dumps(rules),
-            "country_code": "us",
-        }
-        status, body = await _sb_get("/", params, timeout=180.0)
-        if status != 200:
-            return _json({
-                "asin": asin,
-                "error": f"AI extraction HTTP {status} on page {page}: {str(body)[:300]}",
-                "reviews_collected": len(collected),
-                "reviews": collected,
-                "credits_consumed_this_call": (page - 1) * PER_PAGE_COST,
-                "credits_consumed_this_process": _credits_spent_this_run,
-            })
-        _record_spend(PER_PAGE_COST)
+    _record_spend(5)
 
-        page_reviews = body.get("reviews") if isinstance(body, dict) else None
-        if not page_reviews:
-            break  # no more reviews — stop paginating
-
-        for r in page_reviews:
-            body_text = _strip_html(r.get("body"))
-            dedup_key = f"{r.get('reviewer_name')}|{r.get('date')}|{(body_text or '')[:80]}"
-            if dedup_key in seen_ids:
-                continue
-            seen_ids.add(dedup_key)
-            collected.append({
-                "rating": r.get("rating"),
-                "title": _strip_html(r.get("title")),
-                "body": body_text,
-                "date": _parse_iso_date_loose(r.get("date")),
-                "country": r.get("country"),
-                "verified_purchase": r.get("verified_purchase"),
-                "helpful_votes": r.get("helpful_votes"),
-                "variant": r.get("variant"),
-                "reviewer_name": r.get("reviewer_name"),
-            })
-            if len(collected) >= max_reviews:
-                break
-
-        if len(collected) >= max_reviews:
-            break
+    raw_reviews = body.get("reviews") or []
+    normalized: list[dict] = []
+    seen_ids: set[str] = set()
+    for r in raw_reviews:
+        rid = r.get("id")
+        if rid and rid in seen_ids:
+            continue
+        if rid:
+            seen_ids.add(rid)
+        body_text = _strip_html(r.get("content"))
+        normalized.append({
+            "rating": r.get("rating"),
+            "title": _strip_html(r.get("title")),
+            "body": body_text,
+            "date": _parse_iso_date_loose(r.get("timestamp")),
+            "verified_purchase": r.get("is_verified"),
+            "helpful_votes": r.get("helpful_count") or 0,
+            "variant": r.get("product_attributes"),
+            "reviewer_name": r.get("author"),
+            "review_id": rid,
+        })
 
     return _json({
         "asin": asin,
-        "domain": domain,
-        "sort": sort,
-        "reviews_collected": len(collected),
-        "reviews": collected,
-        "credits_consumed_this_call": estimated_cost,
+        "domain": loc.get("domain"),
+        "reviews_count_total": body.get("reviews_count"),
+        "rating_overall": body.get("rating"),
+        "rating_stars_distribution": body.get("rating_stars_distribution"),
+        "reviews_returned": len(normalized),
+        "reviews": normalized,
+        "note": (
+            "Only the ~8 top reviews Amazon surfaces inline are returned; "
+            "the full /product-reviews/ page requires login on Amazon and "
+            "isn't accessible via ScrapingBee proxies. For deeper review "
+            "pulls across many ASINs, use this tool repeatedly."
+        ),
+        "credits_consumed_this_call": 5,
         "credits_consumed_this_process": _credits_spent_this_run,
     })
 
