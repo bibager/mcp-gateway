@@ -830,6 +830,19 @@ async def search_products(term: str, domain: str = "US", per_page: int = 40) -> 
 # --- Operations --------------------------------------------------------------
 
 
+def _status_dict(status_obj: Any) -> dict[str, Any]:
+    """Normalize keepa's Status (older versions: dict; newer: dataclass-like object)."""
+    if status_obj is None:
+        return {}
+    if isinstance(status_obj, dict):
+        return status_obj
+    if hasattr(status_obj, "__dict__"):
+        return {k: v for k, v in vars(status_obj).items() if not k.startswith("_")}
+    if hasattr(status_obj, "_asdict"):
+        return dict(status_obj._asdict())
+    return {}
+
+
 @mcp.tool(
     name="get_token_status",
     annotations={"readOnlyHint": True, "destructiveHint": False},
@@ -849,15 +862,17 @@ async def get_token_status() -> str:
             "error": _format_keepa_error(e),
             "tokens_left": 0,
         })
-    status = getattr(client, "status", None) or {}
+    status = _status_dict(getattr(client, "status", None))
+    refill_in = status.get("refillIn")
     return _json({
         "ok": True,
         "tokens_left": getattr(client, "tokens_left", None),
         "refill_rate_per_minute": status.get("refillRate"),
-        "refill_in_seconds": status.get("refillIn"),
+        "refill_in_seconds": (refill_in / 1000) if isinstance(refill_in, (int, float)) else None,
         "tokens_consumed_total": status.get("tokensConsumed"),
+        "token_flow_reduction": status.get("tokenFlowReduction"),
         "subscription": {
-            "expires_at": status.get("subscriptionExpires"),
+            "expires_at_epoch_ms": status.get("subscriptionExpires"),
             "max_tokens": status.get("maxTokens"),
         },
         "raw_status": status,
