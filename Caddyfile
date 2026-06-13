@@ -70,6 +70,12 @@
         reverse_proxy localhost:8013
     }
 
+    # --- Keepa MCP: keepa.bibager.com (Amazon historical price/BSR/buybox via Keepa API) ---
+    @keepa header Host keepa.bibager.com
+    handle @keepa {
+        reverse_proxy localhost:8014
+    }
+
     # --- GA MCP: mcp.bibager.com/ga/* and root OAuth ---
     @ga_path path /ga/*
     handle @ga_path {
@@ -126,6 +132,10 @@
 
     handle_path /datarova/* {
         reverse_proxy localhost:8013
+    }
+
+    handle_path /keepa/* {
+        reverse_proxy localhost:8014
     }
 
     handle {

@@ -1,0 +1,6 @@
+fastmcp>=2.0
+uvicorn[standard]
+httpx
+starlette
+python-multipart
+keepa>=1.3
