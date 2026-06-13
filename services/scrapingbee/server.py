@@ -370,12 +370,30 @@ async def get_product(
     return _json(out)
 
 
+def _as_dict(x: Any) -> dict:
+    """Defensively coerce a possibly-list-or-dict subtree to a dict for .get() calls."""
+    if isinstance(x, dict):
+        return x
+    if isinstance(x, list) and x and isinstance(x[0], dict):
+        return x[0]  # first entry — most relevant
+    return {}
+
+
 def _normalize_product(p: dict) -> dict:
-    """Project the rich ScrapingBee product response into the spec's snapshot shape."""
-    buybox = p.get("buybox") or {}
-    delivery = p.get("delivery") or {}
+    """Project the rich ScrapingBee product response into the spec's snapshot shape.
+
+    ScrapingBee's response shape is inconsistent between fields: ``buybox``
+    may come back as a dict OR a list of offers; ``delivery`` may come back
+    as a dict OR a list of delivery options. We coerce both, and stash the
+    raw subtree for callers that need the full structure.
+    """
+    buybox_raw = p.get("buybox")
+    delivery_raw = p.get("delivery")
+    buybox = _as_dict(buybox_raw)
+    delivery = _as_dict(delivery_raw)
     sales_rank = p.get("sales_rank") or []
-    # Pick the first (most specific) and last (root) entries from the ladder
+    if not isinstance(sales_rank, list):
+        sales_rank = []
     bsr_primary = sales_rank[0] if sales_rank else None
 
     return {
@@ -399,6 +417,7 @@ def _normalize_product(p: dict) -> dict:
             "is_fba": buybox.get("is_fba"),
             "stock": buybox.get("stock") or buybox.get("availability"),
         },
+        "buybox_raw": buybox_raw,
         "coupon": p.get("coupon"),
         "coupon_discount_percentage": p.get("coupon_discount_percentage"),
         "deal_type": p.get("deal_type"),
@@ -407,6 +426,7 @@ def _normalize_product(p: dict) -> dict:
             "fastest_delivery": delivery.get("fastest_delivery"),
             "from": delivery.get("from"),
         },
+        "delivery_raw": delivery_raw,
         "bsr_primary": bsr_primary,
         "sales_rank_ladder": sales_rank,
     }
@@ -469,7 +489,8 @@ async def get_offers(
             f"ScrapingBee /amazon/product HTTP {status}: {str(body)[:300]}"
         )
     _record_spend(5)
-    buybox = body.get("buybox") or {}
+    buybox_raw = body.get("buybox")
+    buybox = _as_dict(buybox_raw)
     return _json({
         "asin": asin,
         "domain": loc.get("domain"),
@@ -482,7 +503,7 @@ async def get_offers(
             "stock": buybox.get("stock") or buybox.get("availability"),
         },
         "other_offers": body.get("other_offers"),
-        "raw_buybox": buybox,
+        "raw_buybox": buybox_raw,
         "credits_consumed_this_call": 5,
         "credits_consumed_this_process": _credits_spent_this_run,
     })
