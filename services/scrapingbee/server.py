@@ -706,6 +706,7 @@ async def get_reviews(
             "url": review_url,
             "premium_proxy": "true",          # required for Amazon reviews
             "render_js": "true",
+            "block_resources": "false",       # ScrapingBee's reviews-page guidance
             "ai_extract_rules": json.dumps(rules),
             "country_code": "us",
         }
