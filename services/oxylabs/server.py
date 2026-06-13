@@ -761,6 +761,136 @@ async def get_seller(
     })
 
 
+# --- Generic web scraping + Google SERP (parity with ScrapingBee) ------------
+
+
+@mcp.tool(
+    name="scrape_url",
+    annotations={"readOnlyHint": True, "destructiveHint": False},
+)
+async def scrape_url(
+    url: str,
+    render: bool = True,
+    parse: bool = False,
+    geo_location: str = "United States",
+) -> str:
+    """
+    Generic web scraping via Oxylabs' ``universal`` source — any public
+    URL (blogs, news, brand stores, research articles).
+
+    Parity with the ScrapingBee MCP's ``scrape_url`` tool for the A/B
+    test, though the param shape differs slightly: Oxylabs uses
+    ``render=html`` for JS rendering and ``parse: true`` for structured
+    JSON on supported domains.
+
+    Args:
+        url: Target URL.
+        render: Use JS rendering (default True). Set False for static HTML.
+        parse: Set True to get structured JSON output (only works for
+            domains Oxylabs has parsers for; otherwise returns raw HTML).
+        geo_location: Geographic location string (e.g. 'United States',
+            'United Kingdom', or a US ZIP like '30301').
+    """
+    _check_budget(1)
+    payload: dict[str, Any] = {
+        "source": "universal",
+        "url": url,
+        "geo_location": geo_location,
+    }
+    if render:
+        payload["render"] = "html"
+    if parse:
+        payload["parse"] = True
+
+    status, body = await _oxy_post(payload, timeout=180.0)
+    if status != 200:
+        raise RuntimeError(f"Oxylabs universal HTTP {status}: {str(body)[:300]}")
+    _record_spend(1)
+
+    if not isinstance(body, dict):
+        return _json({"url": url, "raw": str(body)[:2000]})
+    results = body.get("results") or []
+    if not results:
+        return _json({"url": url, "error": "empty results"})
+    r0 = results[0]
+    content = r0.get("content")
+    return _json({
+        "url": url,
+        "status_code": r0.get("status_code"),
+        "content_type": "json" if isinstance(content, dict) else "html-or-text",
+        "content": content if isinstance(content, dict) else (str(content) or "")[:50000],
+        "truncated": isinstance(content, str) and len(content) > 50000,
+        "credits_consumed_this_call": 1,
+        "credits_consumed_this_process": _results_spent_this_run,
+    })
+
+
+@mcp.tool(
+    name="search_google",
+    annotations={"readOnlyHint": True, "destructiveHint": False},
+)
+async def search_google(
+    query: str,
+    geo_location: str = "United States",
+    pages: int = 1,
+    sort_by: Optional[str] = None,
+) -> str:
+    """
+    Google Search SERP via Oxylabs' ``google_search`` source.
+
+    Returns organic + paid + AI overviews + related searches. Parity
+    with the ScrapingBee MCP's ``search_google`` for the A/B test.
+
+    Args:
+        query: Search query.
+        geo_location: Location string for localization (e.g.
+            'United States', 'United Kingdom'). Oxylabs requires this
+            for Google sources — the ``domain=com`` parameter is no
+            longer supported for localization.
+        pages: Pages to fetch (default 1, cap 5).
+        sort_by: Optional sort (Oxylabs context param). Most use cases
+            don't need this.
+    """
+    pages = max(1, min(int(pages), 5))
+    _check_budget(pages)
+
+    context = []
+    if sort_by:
+        context.append({"key": "sort_by", "value": sort_by})
+
+    payload: dict[str, Any] = {
+        "source": "google_search",
+        "query": query,
+        "geo_location": geo_location,
+        "parse": True,
+        "pages": pages,
+    }
+    if context:
+        payload["context"] = context
+
+    status, body = await _oxy_post(payload, timeout=180.0)
+    if status != 200:
+        raise RuntimeError(f"Oxylabs google_search HTTP {status}: {str(body)[:300]}")
+    _record_spend(pages)
+
+    content = _first_content(body)
+    results = content.get("results") or {}
+    return _json({
+        "query": query,
+        "geo_location": geo_location,
+        "pages_fetched": pages,
+        "organic": results.get("organic"),
+        "paid": results.get("paid"),
+        "ai_overviews": results.get("ai_overviews"),
+        "knowledge_graph": results.get("knowledge_graph"),
+        "related_searches": results.get("related_searches"),
+        "people_also_ask": results.get("related_questions") or results.get("people_also_ask"),
+        "total_results_count": content.get("total_results_count"),
+        "credits_consumed_this_call": pages,
+        "credits_consumed_this_process": _results_spent_this_run,
+    })
+
+
 # --- OAuth 2.0 with PKCE (synthetic — issues MCP_API_KEY as access_token) ---
 
 _oauth_codes: dict[str, dict[str, Any]] = {}

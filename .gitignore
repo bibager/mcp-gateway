@@ -5,3 +5,4 @@ __pycache__/
 .do-spec-keepa.yaml
 .do-spec-sb.yaml
 .do-spec-oxy.yaml
+.do-spec-bump.yaml

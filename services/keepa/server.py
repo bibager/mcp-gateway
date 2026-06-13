@@ -471,7 +471,8 @@ async def get_price_history(
     Args:
         asin: Amazon ASIN.
         price_type: One of 'amazon', 'new', 'used', 'buybox', 'fbm', 'fba',
-            'list_price'. Default 'amazon'.
+            'list_price', 'warehouse', 'collectible', 'refurbished',
+            'lightning_deal'. Default 'amazon'.
         start: Optional YYYY-MM-DD lower bound (UTC).
         end: Optional YYYY-MM-DD upper bound (UTC).
         domain: Marketplace code, default 'US'.
@@ -484,6 +485,11 @@ async def get_price_history(
         "fbm": "NEW_FBM_SHIPPING",
         "fba": "NEW_FBA",
         "list_price": "LISTPRICE",
+        # Extended series — useful for competitor promo / refurb tracking
+        "warehouse": "WAREHOUSE",
+        "collectible": "COLLECTIBLE",
+        "refurbished": "REFURBISHED",
+        "lightning_deal": "LIGHTNING_DEAL",
     }
     key = price_type.lower()
     if key not in series_map:
@@ -974,6 +980,71 @@ async def get_token_status() -> str:
         },
         "raw_status": status,
     })
+
+
+@mcp.tool(
+    name="get_variations",
+    annotations={"readOnlyHint": True, "destructiveHint": False},
+)
+async def get_variations(asin: str, domain: str = "US") -> str:
+    """
+    Get the parent/child ASIN variation tree for a product.
+
+    Useful for catalog management — e.g. given B07LGXQQQM (Manuka Doctor
+    MGO 525+ jar), returns the parent ASIN and all child ASINs (other
+    sizes, multi-packs, flavor variants). The returned product also
+    includes ``variation_attributes`` describing each child's size,
+    flavor, count, etc.
+
+    Args:
+        asin: Amazon ASIN.
+        domain: Marketplace code, default 'US'.
+    """
+    client = await _get_client()
+    try:
+        products = await asyncio.to_thread(
+            client.query, asin, domain=domain, history=False, wait=False
+        )
+    except Exception as e:
+        raise RuntimeError(_format_keepa_error(e)) from e
+    if not products:
+        raise RuntimeError(f"No product returned for ASIN {asin!r}")
+    p = products[0]
+    return _json({
+        "asin": p.get("asin"),
+        "parent_asin": p.get("parentAsin"),
+        "variation_csv": p.get("variationCSV"),
+        "variations": p.get("variations"),
+        "variation_attributes": p.get("variationAttributes"),
+        "frequently_bought_together": p.get("frequentlyBoughtTogether"),
+    })
+
+
+@mcp.tool(
+    name="lookup_category",
+    annotations={"readOnlyHint": True, "destructiveHint": False},
+)
+async def lookup_category(category_id: int, domain: str = "US") -> str:
+    """
+    Get details for an Amazon category node by ID.
+
+    Useful for interpreting BSR ladders — when ``get_sales_rank_history``
+    returns ``category_node: {catId: 16317891, name: "Honey"}``, call
+    this with ``category_id=16317891`` for the full tree and parent
+    category context.
+
+    Args:
+        category_id: Numeric Amazon category node ID.
+        domain: Marketplace code, default 'US'.
+    """
+    client = await _get_client()
+    try:
+        result = await asyncio.to_thread(
+            client.category_lookup, category_id, domain=domain, wait=False
+        )
+    except Exception as e:
+        raise RuntimeError(_format_keepa_error(e)) from e
+    return _json(result)
 
 
 # --- Internal: cached product history fetch ----------------------------------

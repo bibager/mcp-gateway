@@ -717,6 +717,204 @@ async def get_reviews(
     })
 
 
+# --- Tools: Generic web scraping + Google SERP ------------------------------
+
+
+@mcp.tool(
+    name="scrape_url",
+    annotations={"readOnlyHint": True, "destructiveHint": False},
+)
+async def scrape_url(
+    url: str,
+    render_js: bool = True,
+    premium_proxy: bool = False,
+    ai_query: Optional[str] = None,
+    return_format: str = "html",
+) -> str:
+    """
+    Generic web scraping for any URL — blogs, news, brand stores,
+    research articles, non-Amazon competitor sites.
+
+    Use for off-Amazon competitive intel: "what is X blog saying about
+    manuka honey", "what does the Manuka Health brand storefront show",
+    "summarize this FDA labeling guidance page", etc.
+
+    Args:
+        url: Target URL.
+        render_js: Wait for JavaScript to execute (default True). False
+            saves credits but won't get JS-rendered content.
+        premium_proxy: Use the premium residential proxy pool. Default
+            False — only enable if a site is bot-detecting standard
+            proxies. Premium adds significant credit cost.
+        ai_query: Optional natural-language question — uses ScrapingBee's
+            ai_query parameter to extract a single answer from the page.
+            +5 credits when set.
+        return_format: 'html' (default), 'markdown' (cleaner for LLM
+            consumption), or 'text' (plain text only).
+
+    Credit cost: 1 (no JS) / 5 (JS) base, +20 if premium_proxy=True,
+    +5 if ai_query set. Returns the scraped content + metadata.
+    """
+    cost = (5 if render_js else 1) + (20 if premium_proxy else 0) + (5 if ai_query else 0)
+    _check_budget(cost)
+
+    params: dict[str, Any] = {
+        "url": url,
+        "render_js": "true" if render_js else "false",
+    }
+    if premium_proxy:
+        params["premium_proxy"] = "true"
+    if ai_query:
+        params["ai_query"] = ai_query
+    if return_format == "markdown":
+        params["return_page_markdown"] = "true"
+    elif return_format == "text":
+        params["return_page_text"] = "true"
+
+    status, body = await _sb_get("/", params, timeout=180.0)
+    if status != 200:
+        raise RuntimeError(f"ScrapingBee scrape failed HTTP {status}: {str(body)[:300]}")
+    _record_spend(cost)
+
+    if isinstance(body, dict):
+        return _json({
+            "url": url,
+            "content": body,
+            "credits_consumed_this_call": cost,
+            "credits_consumed_this_process": _credits_spent_this_run,
+        })
+    return _json({
+        "url": url,
+        "content_length": len(body) if body else 0,
+        "content": (body or "")[:50000],
+        "truncated": bool(body and len(body) > 50000),
+        "credits_consumed_this_call": cost,
+        "credits_consumed_this_process": _credits_spent_this_run,
+    })
+
+
+@mcp.tool(
+    name="get_screenshot",
+    annotations={"readOnlyHint": True, "destructiveHint": False},
+)
+async def get_screenshot(url: str, full_page: bool = True) -> str:
+    """
+    Capture a screenshot of a URL — useful for visual reference of a
+    listing, ad, or storefront. Returns the image bytes as base64 plus
+    metadata.
+
+    Args:
+        url: Target URL.
+        full_page: True (default) for the whole scrollable page, False
+            for the visible viewport only.
+
+    Credit cost: 5 (JS rendering required for screenshots).
+    """
+    _check_budget(5)
+    params: dict[str, Any] = {
+        "url": url,
+        "render_js": "true",
+        "screenshot": "true",
+    }
+    if full_page:
+        params["screenshot_full_page"] = "true"
+
+    # Raw response is the image bytes; we get them via httpx directly
+    qs = dict(params)
+    qs["api_key"] = SB_API_KEY
+    async with httpx.AsyncClient(timeout=120.0) as client:
+        r = await client.get(f"{SB_BASE}/", params=qs)
+    if r.status_code != 200:
+        raise RuntimeError(
+            f"ScrapingBee screenshot HTTP {r.status_code}: {r.text[:300]}"
+        )
+    _record_spend(5)
+
+    import base64
+    img_b64 = base64.b64encode(r.content).decode("ascii")
+    return _json({
+        "url": url,
+        "full_page": full_page,
+        "content_type": r.headers.get("content-type", "image/png"),
+        "size_bytes": len(r.content),
+        "image_base64": img_b64,
+        "credits_consumed_this_call": 5,
+        "credits_consumed_this_process": _credits_spent_this_run,
+    })
+
+
+@mcp.tool(
+    name="search_google",
+    annotations={"readOnlyHint": True, "destructiveHint": False},
+)
+async def search_google(
+    query: str,
+    search_type: str = "classic",
+    country: str = "us",
+    date_range: Optional[str] = None,
+    page: int = 1,
+) -> str:
+    """
+    Google Search SERP for a query — organic, ads, AI overviews,
+    knowledge graph, "people also ask", related searches.
+
+    Use for brand mention tracking ("manuka doctor" Google volume),
+    competitor PR / news monitoring, awareness signal, etc.
+
+    Args:
+        query: Search query.
+        search_type: 'classic' (default), 'news', 'shopping', 'images',
+            'maps', 'lens', or 'ai_mode'.
+        country: ISO 3166 country code (default 'us').
+        date_range: Optional recency filter — 'past_hour', 'past_day',
+            'past_week', 'past_month', 'past_year'.
+        page: Result page (default 1).
+
+    Credit cost: 10 (light_request default).
+    """
+    _check_budget(10)
+    params: dict[str, Any] = {
+        "search": query,
+        "search_type": search_type,
+        "country_code": country,
+        "page": page,
+    }
+    if date_range:
+        params["date_range"] = date_range
+    status, body = await _sb_get("/store/google", params, timeout=120.0)
+    if status != 200:
+        raise RuntimeError(f"ScrapingBee /store/google HTTP {status}: {str(body)[:300]}")
+    _record_spend(10)
+
+    if not isinstance(body, dict):
+        return _json({
+            "query": query, "raw": str(body)[:2000],
+            "credits_consumed_this_call": 10,
+            "credits_consumed_this_process": _credits_spent_this_run,
+        })
+
+    return _json({
+        "query": query,
+        "search_type": search_type,
+        "country": country,
+        "page": page,
+        "organic_results": body.get("organic_results"),
+        "ai_overviews": body.get("ai_overviews"),
+        "top_ads": body.get("top_ads"),
+        "bottom_ads": body.get("bottom_ads"),
+        "knowledge_graph": body.get("knowledge_graph"),
+        "questions": body.get("questions"),
+        "related_queries": body.get("related_queries"),
+        "related_searches": body.get("related_searches"),
+        "news_results": body.get("news_results"),
+        "top_stories": body.get("top_stories"),
+        "local_results": body.get("local_results"),
+        "meta_data": body.get("meta_data"),
+        "credits_consumed_this_call": 10,
+        "credits_consumed_this_process": _credits_spent_this_run,
+    })
+
+
 # --- OAuth 2.0 with PKCE (synthetic — issues MCP_API_KEY as access_token) ---
 
 _oauth_codes: dict[str, dict[str, Any]] = {}
