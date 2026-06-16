@@ -88,6 +88,12 @@
         reverse_proxy localhost:8016
     }
 
+    # --- Google Sheets MCP: sheets.bibager.com (read/write Sheets via service account) ---
+    @gsheets header Host sheets.bibager.com
+    handle @gsheets {
+        reverse_proxy localhost:8017
+    }
+
     # --- GA MCP: mcp.bibager.com/ga/* and root OAuth ---
     @ga_path path /ga/*
     handle @ga_path {
@@ -156,6 +162,10 @@
 
     handle_path /oxylabs/* {
         reverse_proxy localhost:8016
+    }
+
+    handle_path /sheets/* {
+        reverse_proxy localhost:8017
     }
 
     handle {

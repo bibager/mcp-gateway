@@ -6,3 +6,4 @@ __pycache__/
 .do-spec-sb.yaml
 .do-spec-oxy.yaml
 .do-spec-bump.yaml
+.do-spec-sheets.yaml

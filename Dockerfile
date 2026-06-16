@@ -31,6 +31,7 @@ COPY services/datarova/requirements.txt /tmp/datarova-requirements.txt
 COPY services/keepa/requirements.txt /tmp/keepa-requirements.txt
 COPY services/scrapingbee/requirements.txt /tmp/scrapingbee-requirements.txt
 COPY services/oxylabs/requirements.txt /tmp/oxylabs-requirements.txt
+COPY services/gsheets/requirements.txt /tmp/gsheets-requirements.txt
 
 RUN pip install --no-cache-dir \
     -r /tmp/monarch-requirements.txt \
@@ -47,7 +48,8 @@ RUN pip install --no-cache-dir \
     -r /tmp/datarova-requirements.txt \
     -r /tmp/keepa-requirements.txt \
     -r /tmp/scrapingbee-requirements.txt \
-    -r /tmp/oxylabs-requirements.txt
+    -r /tmp/oxylabs-requirements.txt \
+    -r /tmp/gsheets-requirements.txt
 
 COPY Caddyfile .
 COPY supervisord.conf /etc/supervisor/conf.d/supervisord.conf

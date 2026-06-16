@@ -1,0 +1,8 @@
+fastmcp>=2.0
+uvicorn[standard]
+httpx
+starlette
+python-multipart
+google-api-python-client>=2.100
+google-auth>=2.20
+google-auth-httplib2>=0.2
