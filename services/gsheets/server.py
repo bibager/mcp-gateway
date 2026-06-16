@@ -35,6 +35,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import secrets
 import time
 from base64 import urlsafe_b64encode
@@ -132,6 +133,134 @@ async def _run(fn, *args, **kwargs):
         return await asyncio.to_thread(fn, *args, **kwargs)
     except HttpError as e:
         raise RuntimeError(_format_http_error(e)) from e
+
+
+# --- Formatting / batchUpdate helpers ----------------------------------------
+
+
+def _hex_to_color(hex_str: Optional[str]) -> Optional[dict]:
+    """Convert '#RRGGBB' or '#RRGGBBAA' to Google's {red,green,blue,alpha} (0-1 floats)."""
+    if not hex_str:
+        return None
+    s = hex_str.lstrip("#")
+    if len(s) not in (6, 8):
+        raise ValueError(f"Color {hex_str!r} must be #RRGGBB or #RRGGBBAA")
+    r = int(s[0:2], 16) / 255.0
+    g = int(s[2:4], 16) / 255.0
+    b = int(s[4:6], 16) / 255.0
+    color: dict[str, float] = {"red": r, "green": g, "blue": b}
+    if len(s) == 8:
+        color["alpha"] = int(s[6:8], 16) / 255.0
+    return color
+
+
+def _col_letter_to_index(letters: str) -> int:
+    """'A' -> 0, 'B' -> 1, ..., 'AA' -> 26."""
+    n = 0
+    for ch in letters.upper():
+        n = n * 26 + (ord(ch) - ord("A") + 1)
+    return n - 1
+
+
+_A1_RE = re.compile(
+    r"^(?:(?P<sheet>'[^']+'|[^!]+)!)?"
+    r"(?P<start_col>[A-Z]+)?(?P<start_row>\d+)?"
+    r"(?::(?P<end_col>[A-Z]+)?(?P<end_row>\d+)?)?$",
+    re.IGNORECASE,
+)
+
+
+# Cache of {spreadsheet_id: {tab_name_lower: sheet_id, ...}}; invalidated on
+# add/delete/duplicate sheet ops.
+_sheet_id_cache: dict[str, dict[str, int]] = {}
+
+
+async def _sheet_map(spreadsheet_id: str) -> dict[str, int]:
+    """Map of tab-name (lowercased) -> numeric sheet ID for the given spreadsheet."""
+    if spreadsheet_id in _sheet_id_cache:
+        return _sheet_id_cache[spreadsheet_id]
+    res = await _run(
+        _sheets_client.spreadsheets()
+        .get(spreadsheetId=spreadsheet_id, fields="sheets.properties(title,sheetId)")
+        .execute
+    )
+    m = {
+        (s.get("properties", {}).get("title") or "").lower(): s.get("properties", {}).get("sheetId")
+        for s in res.get("sheets") or []
+    }
+    _sheet_id_cache[spreadsheet_id] = m
+    return m
+
+
+def _invalidate_sheet_cache(spreadsheet_id: str) -> None:
+    _sheet_id_cache.pop(spreadsheet_id, None)
+
+
+async def _resolve_sheet_id(spreadsheet_id: str, name_or_id: Any) -> int:
+    """Accept a tab name (string) or numeric sheet ID; return the numeric ID."""
+    if isinstance(name_or_id, int):
+        return name_or_id
+    if isinstance(name_or_id, str) and name_or_id.isdigit():
+        return int(name_or_id)
+    m = await _sheet_map(spreadsheet_id)
+    sid = m.get((name_or_id or "").lower())
+    if sid is None:
+        raise ValueError(
+            f"No tab named {name_or_id!r} in spreadsheet {spreadsheet_id}. "
+            f"Available tabs: {sorted(m.keys())}"
+        )
+    return sid
+
+
+async def _a1_to_grid_range(spreadsheet_id: str, range_a1: str) -> dict:
+    """Parse 'Sheet1!A1:E10' into a Google GridRange dict.
+
+    Whole-column 'A:E' and whole-row '1:10' forms are supported.
+    Missing sheet prefix uses the first tab.
+    """
+    m = _A1_RE.match(range_a1.strip())
+    if not m:
+        raise ValueError(f"Could not parse A1 range {range_a1!r}")
+    sheet_name = m.group("sheet")
+    if sheet_name:
+        sheet_name = sheet_name.strip("'")
+        sheet_id = await _resolve_sheet_id(spreadsheet_id, sheet_name)
+    else:
+        # Default to the first tab
+        sm = await _sheet_map(spreadsheet_id)
+        if not sm:
+            raise ValueError(f"Spreadsheet {spreadsheet_id} has no tabs")
+        sheet_id = next(iter(sm.values()))
+
+    gr: dict[str, Any] = {"sheetId": sheet_id}
+    start_col = m.group("start_col")
+    start_row = m.group("start_row")
+    end_col = m.group("end_col")
+    end_row = m.group("end_row")
+    # If the range is just a cell or just rows/cols, populate what's there.
+    if start_col:
+        gr["startColumnIndex"] = _col_letter_to_index(start_col)
+    if start_row:
+        gr["startRowIndex"] = int(start_row) - 1
+    if end_col:
+        gr["endColumnIndex"] = _col_letter_to_index(end_col) + 1
+    elif start_col and not (end_col or end_row):
+        # Single column like "A:A" or single cell — close the range
+        gr["endColumnIndex"] = _col_letter_to_index(start_col) + 1
+    if end_row:
+        gr["endRowIndex"] = int(end_row)
+    elif start_row and not (end_row or end_col):
+        gr["endRowIndex"] = int(start_row)
+    return gr
+
+
+async def _batch_update(spreadsheet_id: str, requests: list[dict]) -> dict:
+    """Run a batchUpdate call. Caller passes the raw 'requests' list."""
+    return await _run(
+        _sheets_client.spreadsheets()
+        .batchUpdate(spreadsheetId=spreadsheet_id, body={"requests": requests})
+        .execute
+    )
 
 
 # --- FastMCP instance --------------------------------------------------------
@@ -485,6 +614,600 @@ async def create_spreadsheet(
             "(typically the same account you used to mint the refresh token). "
             "Anyone in share_with_emails is granted Editor access."
         ),
+    })
+
+
+# --- Tools: Formatting & layout (batchUpdate-backed) ------------------------
+
+
+_HALIGN = {"LEFT", "CENTER", "RIGHT"}
+_VALIGN = {"TOP", "MIDDLE", "BOTTOM"}
+_WRAP = {"OVERFLOW_CELL", "LEGACY_WRAP", "CLIP", "WRAP"}
+_NUMFMT_TYPES = {"NUMBER", "PERCENT", "CURRENCY", "DATE", "TIME", "DATE_TIME",
+                 "SCIENTIFIC", "TEXT"}
+
+
+@mcp.tool(
+    name="format_cells",
+    annotations={"readOnlyHint": False, "destructiveHint": True, "idempotentHint": True},
+)
+async def format_cells(
+    spreadsheet_id: str,
+    range_a1: str,
+    bold: Optional[bool] = None,
+    italic: Optional[bool] = None,
+    underline: Optional[bool] = None,
+    strikethrough: Optional[bool] = None,
+    font_size: Optional[int] = None,
+    font_family: Optional[str] = None,
+    text_color: Optional[str] = None,
+    background_color: Optional[str] = None,
+    horizontal_alignment: Optional[str] = None,
+    vertical_alignment: Optional[str] = None,
+    wrap_strategy: Optional[str] = None,
+    number_format_type: Optional[str] = None,
+    number_format_pattern: Optional[str] = None,
+) -> str:
+    """
+    Apply formatting to a range. All parameters are optional — only the
+    ones you set are changed, others are untouched.
+
+    Args:
+        spreadsheet_id: Sheet ID.
+        range_a1: A1 range, e.g. 'Sheet1!A1:E1' for a header row.
+        bold/italic/underline/strikethrough: text styles.
+        font_size: integer point size (e.g. 11, 14).
+        font_family: e.g. 'Arial', 'Inter', 'Roboto', 'Calibri'.
+        text_color / background_color: '#RRGGBB' hex.
+        horizontal_alignment: 'LEFT' | 'CENTER' | 'RIGHT'.
+        vertical_alignment: 'TOP' | 'MIDDLE' | 'BOTTOM'.
+        wrap_strategy: 'OVERFLOW_CELL' (default Sheets behavior), 'WRAP',
+            'CLIP'.
+        number_format_type: 'NUMBER' | 'PERCENT' | 'CURRENCY' | 'DATE' |
+            'TIME' | 'DATE_TIME' | 'SCIENTIFIC' | 'TEXT'.
+        number_format_pattern: Custom pattern like '$#,##0.00', '0.0%',
+            'mmm dd, yyyy'. Use with number_format_type.
+    """
+    if horizontal_alignment and horizontal_alignment not in _HALIGN:
+        raise ValueError(f"horizontal_alignment must be one of {sorted(_HALIGN)}")
+    if vertical_alignment and vertical_alignment not in _VALIGN:
+        raise ValueError(f"vertical_alignment must be one of {sorted(_VALIGN)}")
+    if wrap_strategy and wrap_strategy not in _WRAP:
+        raise ValueError(f"wrap_strategy must be one of {sorted(_WRAP)}")
+    if number_format_type and number_format_type not in _NUMFMT_TYPES:
+        raise ValueError(f"number_format_type must be one of {sorted(_NUMFMT_TYPES)}")
+
+    cell_format: dict[str, Any] = {}
+    text_format: dict[str, Any] = {}
+    fields: list[str] = []
+
+    if bold is not None:
+        text_format["bold"] = bold; fields.append("userEnteredFormat.textFormat.bold")
+    if italic is not None:
+        text_format["italic"] = italic; fields.append("userEnteredFormat.textFormat.italic")
+    if underline is not None:
+        text_format["underline"] = underline; fields.append("userEnteredFormat.textFormat.underline")
+    if strikethrough is not None:
+        text_format["strikethrough"] = strikethrough; fields.append("userEnteredFormat.textFormat.strikethrough")
+    if font_size is not None:
+        text_format["fontSize"] = int(font_size); fields.append("userEnteredFormat.textFormat.fontSize")
+    if font_family is not None:
+        text_format["fontFamily"] = font_family; fields.append("userEnteredFormat.textFormat.fontFamily")
+    if text_color is not None:
+        text_format["foregroundColor"] = _hex_to_color(text_color)
+        fields.append("userEnteredFormat.textFormat.foregroundColor")
+    if text_format:
+        cell_format["textFormat"] = text_format
+
+    if background_color is not None:
+        cell_format["backgroundColor"] = _hex_to_color(background_color)
+        fields.append("userEnteredFormat.backgroundColor")
+    if horizontal_alignment:
+        cell_format["horizontalAlignment"] = horizontal_alignment
+        fields.append("userEnteredFormat.horizontalAlignment")
+    if vertical_alignment:
+        cell_format["verticalAlignment"] = vertical_alignment
+        fields.append("userEnteredFormat.verticalAlignment")
+    if wrap_strategy:
+        cell_format["wrapStrategy"] = wrap_strategy
+        fields.append("userEnteredFormat.wrapStrategy")
+    if number_format_type or number_format_pattern:
+        nf: dict[str, Any] = {}
+        if number_format_type: nf["type"] = number_format_type
+        if number_format_pattern: nf["pattern"] = number_format_pattern
+        cell_format["numberFormat"] = nf
+        fields.append("userEnteredFormat.numberFormat")
+
+    if not fields:
+        raise ValueError("No formatting parameters provided — nothing to apply.")
+
+    grid = await _a1_to_grid_range(spreadsheet_id, range_a1)
+    requests = [{
+        "repeatCell": {
+            "range": grid,
+            "cell": {"userEnteredFormat": cell_format},
+            "fields": ",".join(fields),
+        }
+    }]
+    res = await _batch_update(spreadsheet_id, requests)
+    return _json({"spreadsheet_id": spreadsheet_id, "range": range_a1, "applied": fields, "replies": res.get("replies", [])})
+
+
+_BORDER_STYLES = {"DOTTED", "DASHED", "SOLID", "SOLID_MEDIUM", "SOLID_THICK", "DOUBLE", "NONE"}
+
+
+@mcp.tool(
+    name="set_borders",
+    annotations={"readOnlyHint": False, "destructiveHint": True, "idempotentHint": True},
+)
+async def set_borders(
+    spreadsheet_id: str,
+    range_a1: str,
+    top: bool = False,
+    bottom: bool = False,
+    left: bool = False,
+    right: bool = False,
+    inner_horizontal: bool = False,
+    inner_vertical: bool = False,
+    all_outer: bool = False,
+    all: bool = False,
+    style: str = "SOLID",
+    color: str = "#000000",
+) -> str:
+    """
+    Apply borders to a range. Use the boolean flags to specify which
+    sides to draw, or use shortcuts:
+
+      - ``all_outer=True``: top + bottom + left + right
+      - ``all=True``: every side including inner gridlines
+
+    Args:
+        spreadsheet_id: Sheet ID.
+        range_a1: A1 range.
+        top/bottom/left/right/inner_horizontal/inner_vertical: per-side toggles.
+        all_outer/all: shortcuts.
+        style: 'DOTTED' | 'DASHED' | 'SOLID' | 'SOLID_MEDIUM' |
+            'SOLID_THICK' | 'DOUBLE' | 'NONE'.
+        color: '#RRGGBB' hex.
+    """
+    if style not in _BORDER_STYLES:
+        raise ValueError(f"style must be one of {sorted(_BORDER_STYLES)}")
+    if all:
+        top = bottom = left = right = inner_horizontal = inner_vertical = True
+    elif all_outer:
+        top = bottom = left = right = True
+    if not any([top, bottom, left, right, inner_horizontal, inner_vertical]):
+        raise ValueError("No sides specified — pass a side flag or all/all_outer.")
+
+    border = {"style": style, "color": _hex_to_color(color) or {"red": 0, "green": 0, "blue": 0}}
+    update: dict[str, Any] = {"range": await _a1_to_grid_range(spreadsheet_id, range_a1)}
+    for side, flag in [("top", top), ("bottom", bottom), ("left", left), ("right", right),
+                       ("innerHorizontal", inner_horizontal), ("innerVertical", inner_vertical)]:
+        if flag:
+            update[side] = border
+
+    res = await _batch_update(spreadsheet_id, [{"updateBorders": update}])
+    return _json({"spreadsheet_id": spreadsheet_id, "range": range_a1, "replies": res.get("replies", [])})
+
+
+@mcp.tool(
+    name="merge_cells",
+    annotations={"readOnlyHint": False, "destructiveHint": True, "idempotentHint": True},
+)
+async def merge_cells(
+    spreadsheet_id: str,
+    range_a1: str,
+    merge_type: str = "MERGE_ALL",
+) -> str:
+    """
+    Merge cells in a range. The top-left cell's value is preserved.
+
+    Args:
+        spreadsheet_id: Sheet ID.
+        range_a1: A1 range.
+        merge_type: 'MERGE_ALL' (default — one big cell), 'MERGE_COLUMNS'
+            (merge each column separately), 'MERGE_ROWS' (merge each row
+            separately).
+    """
+    valid = {"MERGE_ALL", "MERGE_COLUMNS", "MERGE_ROWS"}
+    if merge_type not in valid:
+        raise ValueError(f"merge_type must be one of {sorted(valid)}")
+    grid = await _a1_to_grid_range(spreadsheet_id, range_a1)
+    res = await _batch_update(spreadsheet_id, [{"mergeCells": {"range": grid, "mergeType": merge_type}}])
+    return _json({"spreadsheet_id": spreadsheet_id, "range": range_a1, "merge_type": merge_type, "replies": res.get("replies", [])})
+
+
+@mcp.tool(
+    name="freeze_rows_columns",
+    annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True},
+)
+async def freeze_rows_columns(
+    spreadsheet_id: str,
+    sheet_name_or_id: Any,
+    frozen_rows: Optional[int] = None,
+    frozen_columns: Optional[int] = None,
+) -> str:
+    """
+    Freeze the first N rows and/or columns of a tab so they stay visible
+    when scrolling.
+
+    Args:
+        spreadsheet_id: Sheet ID.
+        sheet_name_or_id: Tab name (e.g. 'TestTab') or numeric sheet ID.
+        frozen_rows: e.g. 1 to freeze the header row. Pass 0 to unfreeze.
+        frozen_columns: e.g. 1 to freeze the leftmost column. Pass 0 to unfreeze.
+    """
+    sheet_id = await _resolve_sheet_id(spreadsheet_id, sheet_name_or_id)
+    props: dict[str, Any] = {"sheetId": sheet_id, "gridProperties": {}}
+    fields: list[str] = []
+    if frozen_rows is not None:
+        props["gridProperties"]["frozenRowCount"] = int(frozen_rows)
+        fields.append("gridProperties.frozenRowCount")
+    if frozen_columns is not None:
+        props["gridProperties"]["frozenColumnCount"] = int(frozen_columns)
+        fields.append("gridProperties.frozenColumnCount")
+    if not fields:
+        raise ValueError("Pass at least one of frozen_rows or frozen_columns.")
+
+    res = await _batch_update(spreadsheet_id, [{
+        "updateSheetProperties": {"properties": props, "fields": ",".join(fields)}
+    }])
+    return _json({"spreadsheet_id": spreadsheet_id, "sheet_id": sheet_id, "applied": fields, "replies": res.get("replies", [])})
+
+
+@mcp.tool(
+    name="set_column_width",
+    annotations={"readOnlyHint": False, "destructiveHint": True, "idempotentHint": True},
+)
+async def set_column_width(
+    spreadsheet_id: str,
+    sheet_name_or_id: Any,
+    start_column: int,
+    end_column: int,
+    width_pixels: int,
+) -> str:
+    """
+    Set the pixel width of one or more columns.
+
+    Args:
+        spreadsheet_id: Sheet ID.
+        sheet_name_or_id: Tab name or numeric ID.
+        start_column: 1-indexed column number (A=1, B=2, ...).
+        end_column: 1-indexed column number (inclusive).
+        width_pixels: Column width in pixels (Sheets default is ~100).
+    """
+    sheet_id = await _resolve_sheet_id(spreadsheet_id, sheet_name_or_id)
+    res = await _batch_update(spreadsheet_id, [{
+        "updateDimensionProperties": {
+            "range": {
+                "sheetId": sheet_id,
+                "dimension": "COLUMNS",
+                "startIndex": int(start_column) - 1,
+                "endIndex": int(end_column),
+            },
+            "properties": {"pixelSize": int(width_pixels)},
+            "fields": "pixelSize",
+        }
+    }])
+    return _json({"spreadsheet_id": spreadsheet_id, "sheet_id": sheet_id, "columns": f"{start_column}-{end_column}", "width_pixels": width_pixels, "replies": res.get("replies", [])})
+
+
+@mcp.tool(
+    name="auto_resize_columns",
+    annotations={"readOnlyHint": False, "destructiveHint": True, "idempotentHint": True},
+)
+async def auto_resize_columns(
+    spreadsheet_id: str,
+    sheet_name_or_id: Any,
+    start_column: int,
+    end_column: int,
+) -> str:
+    """
+    Auto-fit one or more columns to their content.
+
+    Args:
+        spreadsheet_id: Sheet ID.
+        sheet_name_or_id: Tab name or numeric ID.
+        start_column: 1-indexed column number.
+        end_column: 1-indexed column number (inclusive).
+    """
+    sheet_id = await _resolve_sheet_id(spreadsheet_id, sheet_name_or_id)
+    res = await _batch_update(spreadsheet_id, [{
+        "autoResizeDimensions": {
+            "dimensions": {
+                "sheetId": sheet_id,
+                "dimension": "COLUMNS",
+                "startIndex": int(start_column) - 1,
+                "endIndex": int(end_column),
+            }
+        }
+    }])
+    return _json({"spreadsheet_id": spreadsheet_id, "sheet_id": sheet_id, "columns": f"{start_column}-{end_column}", "replies": res.get("replies", [])})
+
+
+# --- Tools: Sheet (tab) management -------------------------------------------
+
+
+@mcp.tool(
+    name="add_sheet",
+    annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False},
+)
+async def add_sheet(
+    spreadsheet_id: str,
+    title: str,
+    rows: Optional[int] = None,
+    columns: Optional[int] = None,
+    index: Optional[int] = None,
+) -> str:
+    """
+    Add a new tab to an existing spreadsheet.
+
+    Args:
+        spreadsheet_id: Sheet ID.
+        title: New tab name (must be unique within the spreadsheet).
+        rows: Optional initial row count (default Sheets: 1000).
+        columns: Optional initial column count (default Sheets: 26).
+        index: Optional 0-indexed position; default appends to the end.
+    """
+    props: dict[str, Any] = {"title": title}
+    grid: dict[str, Any] = {}
+    if rows is not None: grid["rowCount"] = int(rows)
+    if columns is not None: grid["columnCount"] = int(columns)
+    if grid: props["gridProperties"] = grid
+    if index is not None: props["index"] = int(index)
+    res = await _batch_update(spreadsheet_id, [{"addSheet": {"properties": props}}])
+    _invalidate_sheet_cache(spreadsheet_id)
+    new_sheet = (res.get("replies") or [{}])[0].get("addSheet", {}).get("properties", {})
+    return _json({
+        "spreadsheet_id": spreadsheet_id,
+        "sheet_id": new_sheet.get("sheetId"),
+        "title": new_sheet.get("title"),
+        "index": new_sheet.get("index"),
+    })
+
+
+@mcp.tool(
+    name="delete_sheet",
+    annotations={"readOnlyHint": False, "destructiveHint": True, "idempotentHint": True},
+)
+async def delete_sheet(spreadsheet_id: str, sheet_name_or_id: Any) -> str:
+    """
+    Delete a tab from a spreadsheet. Cannot delete the only remaining tab.
+
+    Args:
+        spreadsheet_id: Sheet ID.
+        sheet_name_or_id: Tab name or numeric sheet ID.
+    """
+    sheet_id = await _resolve_sheet_id(spreadsheet_id, sheet_name_or_id)
+    res = await _batch_update(spreadsheet_id, [{"deleteSheet": {"sheetId": sheet_id}}])
+    _invalidate_sheet_cache(spreadsheet_id)
+    return _json({"spreadsheet_id": spreadsheet_id, "deleted_sheet_id": sheet_id, "replies": res.get("replies", [])})
+
+
+@mcp.tool(
+    name="duplicate_sheet",
+    annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False},
+)
+async def duplicate_sheet(
+    spreadsheet_id: str,
+    source_sheet_name_or_id: Any,
+    new_title: str,
+    insert_at_index: Optional[int] = None,
+) -> str:
+    """
+    Duplicate an existing tab (including all data and formatting) under
+    a new name.
+
+    Args:
+        spreadsheet_id: Sheet ID.
+        source_sheet_name_or_id: Tab to copy.
+        new_title: Name for the new copy (must be unique).
+        insert_at_index: Optional 0-indexed position; default appends.
+    """
+    src_id = await _resolve_sheet_id(spreadsheet_id, source_sheet_name_or_id)
+    body: dict[str, Any] = {
+        "sourceSheetId": src_id,
+        "newSheetName": new_title,
+    }
+    if insert_at_index is not None:
+        body["insertSheetIndex"] = int(insert_at_index)
+    res = await _batch_update(spreadsheet_id, [{"duplicateSheet": body}])
+    _invalidate_sheet_cache(spreadsheet_id)
+    new_sheet = (res.get("replies") or [{}])[0].get("duplicateSheet", {}).get("properties", {})
+    return _json({
+        "spreadsheet_id": spreadsheet_id,
+        "source_sheet_id": src_id,
+        "new_sheet_id": new_sheet.get("sheetId"),
+        "new_title": new_sheet.get("title"),
+    })
+
+
+# --- Tools: Charts -----------------------------------------------------------
+
+
+_CHART_TYPES = {"LINE", "BAR", "COLUMN", "AREA", "SCATTER", "COMBO", "STEPPED_AREA", "PIE"}
+
+
+@mcp.tool(
+    name="add_chart",
+    annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False},
+)
+async def add_chart(
+    spreadsheet_id: str,
+    chart_type: str,
+    data_range_a1: str,
+    title: Optional[str] = None,
+    anchor_sheet_name_or_id: Optional[Any] = None,
+    anchor_row: int = 1,
+    anchor_column: int = 1,
+    width_pixels: int = 600,
+    height_pixels: int = 371,
+    legend_position: str = "BOTTOM_LEGEND",
+    headers_in_first_row: bool = True,
+    headers_in_first_column: bool = False,
+) -> str:
+    """
+    Add a chart to a sheet. Covers the common cases — for highly
+    customized charts use the batch_update escape hatch.
+
+    Args:
+        spreadsheet_id: Sheet ID.
+        chart_type: 'LINE' | 'BAR' | 'COLUMN' | 'AREA' | 'SCATTER' |
+            'COMBO' | 'STEPPED_AREA' | 'PIE'.
+        data_range_a1: A1 range of the source data including headers,
+            e.g. 'Data!A1:C20'.
+        title: Optional chart title.
+        anchor_sheet_name_or_id: Tab to place the chart on. Default: the
+            same tab as data_range_a1.
+        anchor_row / anchor_column: 1-indexed cell to anchor the chart's
+            top-left corner.
+        width_pixels / height_pixels: Chart dimensions.
+        legend_position: 'BOTTOM_LEGEND' (default), 'TOP_LEGEND',
+            'LEFT_LEGEND', 'RIGHT_LEGEND', 'NO_LEGEND', 'LABELED_LEGEND'.
+        headers_in_first_row: First row is column headers (default True).
+        headers_in_first_column: First column is row labels (default
+            True effectively — Sheets uses it as the domain axis).
+    """
+    chart_type = chart_type.upper()
+    if chart_type not in _CHART_TYPES:
+        raise ValueError(f"chart_type must be one of {sorted(_CHART_TYPES)}")
+
+    data_grid = await _a1_to_grid_range(spreadsheet_id, data_range_a1)
+    anchor_sheet_id = (
+        await _resolve_sheet_id(spreadsheet_id, anchor_sheet_name_or_id)
+        if anchor_sheet_name_or_id is not None
+        else data_grid["sheetId"]
+    )
+
+    spec: dict[str, Any] = {}
+    if title:
+        spec["title"] = title
+
+    if chart_type == "PIE":
+        # Pie chart wants domain (labels) + one series (values).
+        # Convention: first column = labels, second column = values.
+        sheet_id = data_grid["sheetId"]
+        s_row = data_grid.get("startRowIndex", 0)
+        e_row = data_grid.get("endRowIndex")
+        s_col = data_grid.get("startColumnIndex", 0)
+        e_col = data_grid.get("endColumnIndex", s_col + 2)
+        spec["pieChart"] = {
+            "legendPosition": legend_position,
+            "threeDimensional": False,
+            "domain": {"sourceRange": {"sources": [{
+                "sheetId": sheet_id,
+                "startRowIndex": s_row + (1 if headers_in_first_row else 0),
+                "endRowIndex": e_row,
+                "startColumnIndex": s_col,
+                "endColumnIndex": s_col + 1,
+            }]}},
+            "series": {"sourceRange": {"sources": [{
+                "sheetId": sheet_id,
+                "startRowIndex": s_row + (1 if headers_in_first_row else 0),
+                "endRowIndex": e_row,
+                "startColumnIndex": s_col + 1,
+                "endColumnIndex": s_col + 2,
+            }]}},
+        }
+    else:
+        # basicChart: domain = first column, series = remaining columns.
+        sheet_id = data_grid["sheetId"]
+        s_row = data_grid.get("startRowIndex", 0)
+        e_row = data_grid.get("endRowIndex")
+        s_col = data_grid.get("startColumnIndex", 0)
+        e_col = data_grid.get("endColumnIndex", s_col + 2)
+        series = []
+        for c in range(s_col + 1, e_col):
+            series.append({
+                "series": {"sourceRange": {"sources": [{
+                    "sheetId": sheet_id,
+                    "startRowIndex": s_row,
+                    "endRowIndex": e_row,
+                    "startColumnIndex": c,
+                    "endColumnIndex": c + 1,
+                }]}},
+                "targetAxis": "LEFT_AXIS",
+            })
+        spec["basicChart"] = {
+            "chartType": chart_type,
+            "legendPosition": legend_position,
+            "headerCount": 1 if headers_in_first_row else 0,
+            "domains": [{
+                "domain": {"sourceRange": {"sources": [{
+                    "sheetId": sheet_id,
+                    "startRowIndex": s_row,
+                    "endRowIndex": e_row,
+                    "startColumnIndex": s_col,
+                    "endColumnIndex": s_col + 1,
+                }]}}
+            }],
+            "series": series,
+        }
+
+    request = {
+        "addChart": {
+            "chart": {
+                "spec": spec,
+                "position": {
+                    "overlayPosition": {
+                        "anchorCell": {
+                            "sheetId": anchor_sheet_id,
+                            "rowIndex": int(anchor_row) - 1,
+                            "columnIndex": int(anchor_column) - 1,
+                        },
+                        "widthPixels": int(width_pixels),
+                        "heightPixels": int(height_pixels),
+                    }
+                },
+            }
+        }
+    }
+    res = await _batch_update(spreadsheet_id, [request])
+    new_chart = (res.get("replies") or [{}])[0].get("addChart", {}).get("chart", {})
+    return _json({
+        "spreadsheet_id": spreadsheet_id,
+        "chart_id": new_chart.get("chartId"),
+        "chart_type": chart_type,
+        "title": title,
+        "anchor": {"sheet_id": anchor_sheet_id, "row": anchor_row, "column": anchor_column},
+        "data_range": data_range_a1,
+    })
+
+
+# --- Tools: Escape hatch -----------------------------------------------------
+
+
+@mcp.tool(
+    name="batch_update",
+    annotations={"readOnlyHint": False, "destructiveHint": True, "idempotentHint": False},
+)
+async def batch_update(spreadsheet_id: str, requests: list[dict]) -> str:
+    """
+    Raw spreadsheets.batchUpdate escape hatch — runs any combination of
+    the ~50 request types the Sheets API supports (conditional formatting,
+    pivot tables, named ranges, protected ranges, banding, find/replace,
+    sort/filter, slicers, etc.).
+
+    Pass the exact 'requests' list per Google's spec:
+    https://developers.google.com/sheets/api/reference/rest/v4/spreadsheets/request
+
+    Use the dedicated wrappers (format_cells, add_chart, etc.) when they
+    cover what you need — they handle GridRange conversion and field
+    masking for you. Drop down to this tool only for features the
+    wrappers don't expose.
+
+    Args:
+        spreadsheet_id: Sheet ID.
+        requests: List of request dicts, each keyed by request type
+            (e.g. {'addConditionalFormatRule': {...}}).
+    """
+    if not requests:
+        raise ValueError("requests must be a non-empty list")
+    res = await _batch_update(spreadsheet_id, requests)
+    return _json({
+        "spreadsheet_id": spreadsheet_id,
+        "request_count": len(requests),
+        "replies": res.get("replies", []),
     })
 
 
